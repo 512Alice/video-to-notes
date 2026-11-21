@@ -1470,6 +1470,7 @@
   function watchAnswer(title, batchId, baseSig) {
     if (window.__bnWatching) return; // 同一页面只监控一次，防止多实例重复写文件
     window.__bnWatching = true;
+    window.__bnGenOff = false; // 新一次监控重新启用"生成中不落盘"检测
     let answer = '';
     let stable = 0;
     let guard = 0;
@@ -1603,7 +1604,7 @@
       //        ②长笔记（>=1200 字）稳定阈值再 +6（普通 30 秒 / 专家 42 秒），短笔记仍 12 / 24 秒
       //        ③判定达标要连续两次采样都成立才落盘，多给一轮确认
       const isFixRound = !!window.__bnFixBase;
-      if (!isFixRound && isGenerating()) {
+      if (!isFixRound && !window.__bnGenOff && isGenerating()) {
         genStuck++;
         if (genStuck <= 40) {
           if (t) answer = t;
@@ -1612,8 +1613,11 @@
           setTimeout(tick, 3000);
           return;
         }
+        // 连续 2 分钟都命中，基本可以判定是选择器误伤（页面上有常驻节点），
+        // 本轮监控改为纯文本阈值判定，避免每 2 分钟才检查一次导致落盘越来越慢
+        window.__bnGenOff = true;
         genStuck = 0;
-        console.log('[B站笔记助手] 生成检测连续 40 轮仍命中，疑似选择器误判，放行本轮判定');
+        console.log('[B站笔记助手] 生成检测连续 40 轮仍命中，判定为误伤，本次监控改用纯文本阈值');
       }
       const baseNeed = (window.__bnExpertMode === true) ? 8 : 4;
       const stableNeed = baseNeed + ((answer || '').length >= 1200 ? 6 : 0);
