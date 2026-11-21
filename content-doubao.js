@@ -1452,6 +1452,15 @@
       for (let i = 0; i < sel.length; i++) {
         if (document.querySelector(sel[i])) return true;
       }
+      // 兜底：豆包的"停止生成"按钮可能只挂图标、没有可匹配的类名，按按钮自身的无障碍文本再查一遍。
+      // 用整串精确匹配，避免页面上常驻的"停止"类文案造成永久拦截。
+      const btns = document.querySelectorAll('button, [role="button"]');
+      for (let i = 0; i < btns.length; i++) {
+        const b = btns[i];
+        const raw = (b.getAttribute && b.getAttribute('aria-label')) || b.innerText || b.textContent || '';
+        const t = String(raw).replace(/\s+/g, '').trim();
+        if (t === '停止' || t === '停止生成' || t === '停止回答' || t === 'Stop' || t === 'Stopgenerating') return true;
+      }
       return false;
     } catch (e) {
       return false;
