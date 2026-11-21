@@ -1587,109 +1587,120 @@
   let lastSavedSig = '';
   async function trySend() {
     if (document.visibilityState !== 'visible') return; // 隐藏标签页不发送（多个豆包页时防重复发送）
-    let items = null;
+    // v3.8.5：发送互斥。storage.onChanged 与 1 秒轮询可能同时进来，两次都读到同一条 pending
+    // 就会把同一条字幕发两遍（豆包重新整理一遍 = 你看到的"重复"）。置位是同步的，挡得住并发。
+    if (window.__bnSending) return;
+    window.__bnSending = true;
     try {
-      items = await new Promise((resolve) => chrome.storage.local.get([PENDING_KEY], resolve));
-    } catch (e) {
-      // 扩展重载后旧脚本实例的上下文失效：停止轮询，避免反复报错
-      dead = true;
-      console.log('[B站笔记助手] 扩展上下文已失效（扩展被重载过），旧脚本停止轮询');
-      return;
-    }
-    const pending = items ? items[PENDING_KEY] : null;
-    if (!pending || !pending.text) return;
-
-    // v3.7.80：豆包专家模式（深度思考）——发送前读开关，尝试点击豆包页"深度思考/专家模式"按钮；
-    // 启用后 watchAnswer 的稳定判定阈值延长到 60 秒（专家模式输出慢，防止误判完成截半）
-    try {
-      const ex = await new Promise((resolve) => chrome.storage.local.get({ bn_expert: false }, resolve));
-      window.__bnExpertMode = !!(ex && ex.bn_expert);
-      if (window.__bnExpertMode) {
-        const ok = tryEnableExpertMode();
-        console.log('[B站笔记助手] 豆包专家模式 ' + (ok ? '已启用（深度思考）' : '未找到深度思考开关，按普通模式发送') + '，等待时长延长至 1 分钟');
-      }
-    } catch (e) { /* 读取开关失败按普通模式 */ }
-
-    const text = pending.text;
-    const title = pending.title || '';
-    const batchId = pending.batchId || '';
-    // v3.7.86：只有公式修正请求才沿用上一轮的修正基准；新一轮普通任务（下一个视频/手动发送）
-    // 必须清掉遗留的 __bnFixBase/__bnFixRounds，否则上一视频的修正轮状态会污染下一个视频
-    if (text.indexOf('【公式修正请求】') === 0) {
-      window.__bnFixRounds = 1; // 修正请求本身已消耗一轮
-    } else {
-      window.__bnFixBase = null;
-      window.__bnFixAt = 0;
-      window.__bnFixRounds = 0;
-    }
-
-    const editor = findEditor();
-    if (!editor) {
-      // 页面可能还在加载（新打开的豆包页 React 未渲染完输入框）：保留 pending，等待下一轮轮询重试
-      console.log('[B站笔记助手] 未找到豆包输入框（页面可能仍在加载），保留待发送，等待重试…');
-      return;
-    }
-    // 找到输入框后移除待发送标记，防止轮询/多标签页重复发送
-    chrome.storage.local.remove(PENDING_KEY);
-
-    // v3.7.98：发送前记录页面当前"最后一条回答"的指纹。此时回答区还是上一条视频的笔记，
-    // 用它作基线，新回答没出现之前绝不落盘，避免续存上一条。
-    let baseSig = '';
-    if (text.indexOf('【公式修正请求】') !== 0) {
+      let items = null;
       try {
-        const b = extractAnswerText();
-        baseSig = b ? sig(b) : '';
-        if (baseSig) console.log('[B站笔记助手] 记录发送前回答基线：长度=' + b.length);
-      } catch (e) { /* 取不到基线则退化为仅靠标题校验 */ }
-    }
-
-    if (!setEditorText(editor, text)) {
-      console.log('[B站笔记助手] 输入框写入失败');
-      copyFallback(text);
-      showTip('自动填写失败，字幕已复制到剪贴板，请手动粘贴到豆包输入框后发送。');
-      return;
-    }
-
-    setTimeout(() => {
-      let started = false;
-      const startWatch = () => {
-        if (!started) {
-          started = true;
-          showTip('已自动发送到豆包，正在整理笔记…完成后将尝试自动保存。');
-          console.log('[B站笔记助手] 已发送字幕到豆包，开始监控回答');
-          watchAnswer(title, batchId, baseSig);
-        }
-      };
-      const stillHasText = () => !editorEmpty(editor);
-      if (clickSendButton()) {
-        startWatch();
+        items = await new Promise((resolve) => chrome.storage.local.get([PENDING_KEY], resolve));
+      } catch (e) {
+        // 扩展重载后旧脚本实例的上下文失效：停止轮询，避免反复报错
+        dead = true;
+        console.log('[B站笔记助手] 扩展上下文已失效（扩展被重载过），旧脚本停止轮询');
         return;
       }
-      pressEnter(editor);
-      setTimeout(() => {
-        if (!stillHasText()) { startWatch(); return; }
-        // 合成键盘事件通常不被 React 响应 → 用 CDP 发送真实回车（isTrusted=true）
-        // CDP 回车前重新聚焦输入框（tab 激活/欢迎页切换可能丢失焦点）
-        try { editor.focus(); } catch (e) {}
-        pressEnterReal().then(() => {
-          setTimeout(() => {
-            if (!stillHasText()) { startWatch(); return; }
-            pressEnter(editor);
-            setTimeout(() => {
-              if (!stillHasText()) {
-                console.log('[B站笔记助手] 发送未成功（输入框仍有内容）');
-                copyFallback(text);
-                showTip('自动发送未成功，字幕已复制到剪贴板，请手动粘贴到豆包输入框后发送。');
-              } else {
-                startWatch();
-              }
-            }, 1200);
-          }, 1500);
-        });
-      }, 1200);
-    }, 600);
-  }
+      const pending = items ? items[PENDING_KEY] : null;
+      if (!pending || !pending.text) return;
 
+      const text = pending.text;
+      const title = pending.title || '';
+      const batchId = pending.batchId || '';
+
+      const editor = findEditor();
+      if (!editor) {
+        // 页面可能还在加载（新打开的豆包页 React 未渲染完输入框）：保留 pending，等待下一轮轮询重试
+        console.log('[B站笔记助手] 未找到豆包输入框（页面可能仍在加载），保留待发送，等待重试…');
+        return;
+      }
+      // v3.8.5：等删除真正完成再继续。原来不 await，下一轮轮询可能在删除生效前又读到同一条
+      // pending，于是同一份字幕被第二次写进输入框并再次发送。
+      await new Promise((resolve) => chrome.storage.local.remove(PENDING_KEY, resolve));
+
+      // v3.7.80：豆包专家模式（深度思考）——发送前读开关，尝试点击豆包页"深度思考/专家模式"按钮；
+      // 启用后 watchAnswer 的稳定判定阈值延长（专家模式输出慢，防止误判完成截半）
+      try {
+        const ex = await new Promise((resolve) => chrome.storage.local.get({ bn_expert: false }, resolve));
+        window.__bnExpertMode = !!(ex && ex.bn_expert);
+        if (window.__bnExpertMode) {
+          const ok = tryEnableExpertMode();
+          console.log('[B站笔记助手] 豆包专家模式 ' + (ok ? '已启用（深度思考）' : '未找到深度思考开关，按普通模式发送') + '，等待时长延长至 1 分钟');
+        }
+      } catch (e) { /* 读取开关失败按普通模式 */ }
+
+      // v3.7.86：只有公式修正请求才沿用上一轮的修正基准；新一轮普通任务（下一个视频/手动发送）
+      // 必须清掉遗留的 __bnFixBase/__bnFixRounds，否则上一视频的修正轮状态会污染下一个视频
+      if (text.indexOf('【公式修正请求】') === 0) {
+        window.__bnFixRounds = 1; // 修正请求本身已消耗一轮
+      } else {
+        window.__bnFixBase = null;
+        window.__bnFixAt = 0;
+        window.__bnFixRounds = 0;
+      }
+
+      // v3.7.98：发送前记录页面当前"最后一条回答"的指纹。此时回答区还是上一条视频的笔记，
+      // 用它作基线，新回答没出现之前绝不落盘，避免续存上一条。
+      let baseSig = '';
+      if (text.indexOf('【公式修正请求】') !== 0) {
+        try {
+          const b = extractAnswerText();
+          baseSig = b ? sig(b) : '';
+          if (baseSig) console.log('[B站笔记助手] 记录发送前回答基线：长度=' + b.length);
+        } catch (e) { /* 取不到基线则退化为仅靠标题校验 */ }
+      }
+
+      if (!setEditorText(editor, text)) {
+        console.log('[B站笔记助手] 输入框写入失败');
+        copyFallback(text);
+        showTip('自动填写失败，字幕已复制到剪贴板，请手动粘贴到豆包输入框后发送。');
+        return;
+      }
+
+      setTimeout(() => {
+        let started = false;
+        const startWatch = () => {
+          if (!started) {
+            started = true;
+            showTip('已自动发送到豆包，正在整理笔记…完成后将尝试自动保存。');
+            console.log('[B站笔记助手] 已发送字幕到豆包，开始监控回答');
+            watchAnswer(title, batchId, baseSig);
+          }
+        };
+        const stillHasText = () => !editorEmpty(editor);
+        if (clickSendButton()) {
+          startWatch();
+          return;
+        }
+        pressEnter(editor);
+        // v3.8.5：判定"是否已发出"的宽限从 1.2 秒放宽到 2.5 秒。豆包反应慢时，点完后
+        // 输入框要过一会儿才清空，原来的 1.2 秒会误判成没发出，于是再按一次回车 → 发两条。
+        setTimeout(() => {
+          if (!stillHasText()) { startWatch(); return; }
+          // 合成键盘事件通常不被 React 响应 → 用 CDP 发送真实回车（isTrusted=true）
+          // CDP 回车前重新聚焦输入框（tab 激活/欢迎页切换可能丢失焦点）
+          try { editor.focus(); } catch (e) {}
+          pressEnterReal().then(() => {
+            setTimeout(() => {
+              if (!stillHasText()) { startWatch(); return; }
+              pressEnter(editor);
+              setTimeout(() => {
+                if (!stillHasText()) {
+                  console.log('[B站笔记助手] 发送未成功（输入框仍有内容）');
+                  copyFallback(text);
+                  showTip('自动发送未成功，字幕已复制到剪贴板，请手动粘贴到豆包输入框后发送。');
+                } else {
+                  startWatch();
+                }
+              }, 2500);
+            }, 2500);
+          });
+        }, 2500);
+      }, 600);
+    } finally {
+      window.__bnSending = false;
+    }
+  }
   window.__bnTrySend = trySend;
 
   // ---------- 持续自动保存：用户手动在豆包提问/整理，回答完成后自动写入 Obsidian ----------
