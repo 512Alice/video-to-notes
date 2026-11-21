@@ -36,6 +36,27 @@ body {
 }
 
 .input-row { display: flex; gap: 10px; }
+
+/* 平台切换键 */
+.plat-tabs { display: flex; gap: 8px; margin-bottom: 10px; }
+.plat-tab {
+  padding: 7px 16px;
+  border: 1px solid #d0d3d6;
+  border-radius: 18px;
+  background: #fff;
+  color: #61666d;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all .15s;
+}
+.plat-tab:hover { border-color: #00aeec; color: #00aeec; }
+.plat-tab.active {
+  background: #00aeec;
+  border-color: #00aeec;
+  color: #fff;
+  font-weight: 600;
+}
+
 #bn-url {
   flex: 1;
   padding: 11px 14px;
@@ -120,9 +141,41 @@ details summary {
 }
 .send-card .tip b { color: #00aeec; }
 
+/* v3.7.80：豆包专家模式开关 */
+.expert-opt {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  line-height: 1.5;
+  font-size: 13px;
+  color: #18191c;
+  background: #eef9ff;
+  border: 1px solid #b9e4ff;
+  border-radius: 8px;
+  padding: 9px 12px;
+  margin-bottom: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+.expert-opt input { width: 16px; height: 16px; accent-color: #00aeec; cursor: pointer; }
+
 footer {
   text-align: center;
   font-size: 12px;
   color: #b0b6bd;
   margin-top: 8px;
+}
+
+/* 链接队列（v3.7.79：在单条界面基础上，记完自动填下一个） */
+#bn-queue-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: 1px solid #d0d3d6;
+  border-radius: 8px;
+  font: 13px/1.6 Consolas, "Microsoft YaHei", monospace;
+  margin-bottom: 10px;
+  resize: vertical;
+  min-height: 84px;
 }

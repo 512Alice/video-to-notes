@@ -1,13 +1,24 @@
 {
   "manifest_version": 3,
-  "name": "B站学习笔记助手",
-  "version": "3.7.53",
-  "description": "Fetch Bilibili video subtitles and auto-send to Doubao AI to generate study notes: mind map, key points, and key timestamps. Completely free, no API key needed.",
-  "permissions": ["storage", "tabs", "scripting", "debugger"],
+  "name": "B站/小红书/YouTube 学习笔记助手",
+  "version": "3.8.4",
+  "description": "Fetch Bilibili / Xiaohongshu / YouTube video subtitles and auto-send to Doubao AI to generate six-section structured study notes: key points, glossary, pitfalls & questions, mind map, key timestamps, plus the verbatim transcript. Completely free, no API key needed.",
+  "permissions": [
+    "storage",
+    "tabs",
+    "scripting",
+    "debugger"
+  ],
   "host_permissions": [
     "https://*.bilibili.com/*",
     "https://*.hdslb.com/*",
     "https://*.doubao.com/*",
+    "https://*.xiaohongshu.com/*",
+    "https://*.rednote.com/*",
+    "https://*.rednotecdn.com/*",
+    "https://*.youtube.com/*",
+    "https://youtu.be/*",
+    "https://*.googlevideo.com/*",
     "http://127.0.0.1/*",
     "http://localhost/*"
   ],
@@ -16,13 +27,65 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://www.bilibili.com/video/*"],
-      "js": ["content.js"],
+      "matches": [
+        "https://www.bilibili.com/video/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "content.css"
+      ],
       "run_at": "document_idle"
     },
     {
-      "matches": ["https://*.doubao.com/*"],
-      "js": ["content-doubao.js"],
+      "matches": [
+        "https://www.xiaohongshu.com/explore/*",
+        "https://www.xiaohongshu.com/discovery/item/*",
+        "https://www.rednote.com/discovery/item/*",
+        "https://www.rednote.com/explore/*"
+      ],
+      "js": [
+        "content-xhs.js"
+      ],
+      "css": [
+        "content.css"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://www.youtube.com/watch*",
+        "https://www.youtube.com/shorts/*",
+        "https://m.youtube.com/watch*"
+      ],
+      "js": [
+        "hook-youtube.js"
+      ],
+      "world": "MAIN",
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "https://www.youtube.com/watch*",
+        "https://www.youtube.com/shorts/*",
+        "https://m.youtube.com/watch*"
+      ],
+      "js": [
+        "content-youtube.js"
+      ],
+      "css": [
+        "content.css"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://*.doubao.com/*"
+      ],
+      "js": [
+        "content-doubao.js"
+      ],
       "run_at": "document_idle"
     }
   ],
@@ -33,3 +96,7 @@
     "128": "icons/icon128.png"
   }
 }
+
+
+
+

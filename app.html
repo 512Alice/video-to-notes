@@ -3,27 +3,32 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>B站学习笔记助手</title>
+  <title>B站/小红书/YouTube 学习笔记助手</title>
   <link rel="stylesheet" href="app.css">
 </head>
 <body>
   <div class="wrap">
     <header class="hero">
-      <h1>B站学习笔记助手</h1>
-      <p class="sub">粘贴 B 站视频链接，一键把字幕发给豆包，免费生成 <b>思维导图</b> + <b>核心要点</b> + <b>关键节点</b>，并可自动存入 Obsidian</p>
+      <h1>视频学习笔记助手</h1>
+      <p class="sub">粘贴视频链接，一键把字幕发给豆包，免费生成 <b>六板块结构化笔记</b>（核心要点 · 术语表 · 易错点与疑问 · 思维导图 · 关键节点 · 原始字幕），并可自动存入 Obsidian</p>
     </header>
 
     <section class="card">
+      <div class="plat-tabs" id="bn-plats">
+        <button class="plat-tab active" data-plat="bili">B站</button>
+        <button class="plat-tab" data-plat="xhs">小红书</button>
+        <button class="plat-tab" data-plat="yt">YouTube</button>
+      </div>
       <div class="input-row">
         <input id="bn-url" type="text" placeholder="粘贴 B 站视频链接，如 https://www.bilibili.com/video/BV1xx411c7mD" spellcheck="false">
         <button id="bn-start" class="primary">抓取字幕</button>
       </div>
-      <p class="hint">支持分 P：在链接后加 <code>&amp;p=3</code> 表示第 3 集（不加默认第 1 集）。</p>
+      <p class="hint" id="bn-plat-hint">支持分 P：在链接后加 <code>&amp;p=3</code> 表示第 3 集（不加默认第 1 集）。</p>
     </section>
 
     <section class="card">
       <div class="video-title" id="bn-video-title">—</div>
-      <div class="status" id="bn-status">打开一个 B 站视频链接，粘贴到上方输入框后点「抓取字幕」。</div>
+      <div class="status" id="bn-status">选好平台、粘贴链接后点「抓取字幕」。</div>
     </section>
 
     <section class="card">
@@ -34,11 +39,21 @@
     </section>
 
     <section class="card send-card">
-      <button id="bn-send" class="primary big" disabled>发送到豆包整理（思维导图 + 要点）</button>
+      <label class="expert-opt">
+        <input type="checkbox" id="bn-expert"> 豆包专家模式（深度思考，笔记更专业；等待时长延长至约 1 分钟）
+      </label>
+      <label class="expert-opt">
+        <input type="checkbox" id="bn-ts-link"> 关键节点加时间戳跳转链接（点一下回到视频原画面）
+      </label>
+      <label class="expert-opt">
+        <input type="checkbox" id="bn-frames"> 自动截关键画面插图（需该视频的 B 站页面已打开，不新开页面）
+      </label>
+      <button id="bn-send" class="primary big" disabled>发送到豆包整理（六板块结构化笔记）</button>
       <button id="bn-debug" class="secondary big">🔧 调试：用内置测试字幕发送（免B站登录）</button>
       <p class="tip">
         前提：请在 Edge 中登录豆包网页 <b>www.doubao.com</b>（登录一次即可）。<br>
-        点击后会自动打开豆包并发送，豆包输出：① 思维导图（Mermaid 代码）② 核心要点 ③ 关键节点时间表。<br>
+        点击后会自动打开豆包并发送，豆包输出六板块：① 核心要点 ② 术语表 ③ 易错点与疑问 ④ 思维导图（可折叠）⑤ 关键节点时间表 ⑥ 原始字幕（插件自动附在文末，可对照）。
+        保真优先：字幕里的数字、时间、专名、公式原样保留，不确定的内容只写成【疑问】不编答案。<br>
         若下方 Obsidian 已配置，整理完成后笔记会<b>自动写入 Obsidian</b>；未配置则只在豆包页查看，可在对话框继续发截图补充。
       </p>
     </section>
@@ -56,12 +71,25 @@
       </div>
       <div class="input-row">
         <button id="ob-save" class="primary">保存设置</button>
+        <button id="ob-test" class="secondary">测试连接</button>
       </div>
       <p class="hint">
         开启方法：Obsidian → 设置 → 第三方插件 → 关闭安全模式 → 社区插件市场搜 <b>Local REST API</b> 安装并启用 →
         打开它的设置 → 记下 API Key（默认端口 27123）。装好 Obsidian 后按 README 一步步配即可。
       </p>
       <div class="status" id="ob-status"></div>
+    </section>
+
+    <section class="card">
+      <h2 class="sec-title">链接队列（记完一个笔记，自动把下一个链接填到上方输入框）</h2>
+      <textarea id="bn-queue-input" rows="4" placeholder="每行粘贴一个视频链接（B站 / 小红书 / YouTube 可混排）。点「开始逐个处理」后：第 1 个链接自动填入上方输入框并抓取字幕 → 你核对后点「发送到豆包」→ 笔记记完自动把下一个链接填进来，逐个完成"></textarea>
+      <div class="input-row">
+        <button id="bn-queue-set" class="primary">加入队列</button>
+        <button id="bn-queue-start" class="primary">开始逐个处理</button>
+        <button id="bn-queue-skip" class="secondary">跳过当前</button>
+        <button id="bn-queue-clear" class="secondary">清空队列</button>
+      </div>
+      <div class="status" id="bn-queue-status">队列为空。把多个视频链接贴进来，点「开始逐个处理」：每个视频都走上方单条流程（抓字幕 → 核对 → 发送 → 记完自动填下一个链接）。</div>
     </section>
 
     <section class="card">
