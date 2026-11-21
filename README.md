@@ -2,19 +2,21 @@
 
 ## English Introduction
 
-**Bilibili / Xiaohongshu Study Note Assistant** — a lightweight, free browser extension that turns Bilibili and Xiaohongshu videos into structured study notes:
+**Bilibili / Xiaohongshu / YouTube Study Note Assistant** — a lightweight, free browser extension that turns videos into structured study notes:
 
-1. Paste a Bilibili video link (multi-part videos supported via `&p=N`).
+1. Paste a video link (Bilibili multi-part supported via `&p=N`; Xiaohongshu video notes and YouTube videos are also supported).
 
-2. Automatically fetch the video subtitles (supports Bilibili's AI-generated subtitles; a Bilibili login is required to read them).
+2. Automatically fetch the subtitles (Bilibili's AI subtitles need a Bilibili login to read; Xiaohongshu reads the `.srt` track stored in the note page; YouTube uses a page hook / in-page fetch / CDP network fallback to get past the PoToken check).
 
 3. One click sends the subtitles to **Doubao**, a free AI chatbot, with a tailored prompt.
 
-4. Doubao outputs a clean Markdown note with three parts: **Key Points** (detailed notes organized by topic), **Mind Map** (an expandable knowledge tree using Obsidian callouts — click each section title to expand its explanation), and **Key Timestamps** (`[mm:ss]` time + what happens at that point). Math symbols are converted to standard LaTeX with subscripts (`$U_{CE}$`, `$I_Z$`, `$$...$$`).
+4. Doubao outputs a clean Markdown note in six sections: **Key Points**, **Glossary**, **Pitfalls & Questions**, **Mind Map** (an expandable knowledge tree using Obsidian callouts), **Key Timestamps** (`[mm:ss]` plus what happens at that point), and the **verbatim transcript**. Math is converted to standard LaTeX (`$U_{CE}$`, `$$\frac{a}{b}$$`).
 
-5. Automatically saves the finished note into **Obsidian** via the free Local REST API plugin — **works continuously for multiple videos**; note titles use each part's subtitle name (v3.7.40+), and the mind map is an expandable knowledge tree (v3.7.44+).
+5. Automatically saves the note into **Obsidian** via the free Local REST API plugin — works continuously for multiple videos, and note titles follow each video's own title.
 
-Everything is free and local-first: no API keys, no large models to download, and no data collection. Notes go only to your own Doubao conversation and your local Obsidian vault.
+6. Two optional toggles: turn every `[mm:ss]` in Key Timestamps into a click-to-seek link; and auto-capture 3–5 key frames from the already-open video page, with the PNGs written into your vault and inserted **right under the matching timestamp line** in the Key Timestamps section.
+
+Everything is free and local-first: no API keys, no models to download, no data collection. Notes go only to your own Doubao conversation and your local Obsidian vault.
 
 一个**网页式**的免费工具（基于浏览器扩展实现）：打开网页界面 → 粘贴 **B 站 / 小红书 / YouTube** 视频链接 → 自动抓取字幕 → 一键发送给豆包 → 豆包免费输出**六板块结构化笔记**（核心要点 / 术语表 / 易错点与疑问 / 思维导图 / 关键节点 / 原始字幕），整理结果**自动存入 Obsidian**（可选），**支持连续处理多个视频**。
 
