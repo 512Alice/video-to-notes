@@ -1437,6 +1437,27 @@
   // 发送成功后监控豆包的回答：文本稳定后视为整理完成
   // v3.7.39：监控结束（保存/超时）即释放 __bnWatching，允许连续处理下一个视频。
   // 此前标志在第一次监控后永久锁死，导致第二个视频发送后无人监控、笔记不生成。
+  // v3.8.6：豆包"还在生成中"探测。之前只按"文本 12 秒没变化"判完成，长笔记中途停顿（写公式、
+  // 分段渲染）会被当成写完 → 立刻触发公式修正请求 → 你看到"输出一半就开始改公式"。
+  // 这里只要页面上还挂着"停止生成"一类控件，就绝不判定完成。选择器不命中时返回 false（不误拦）。
+  function isGenerating() {
+    try {
+      const sel = [
+        'button[aria-label*="停止"]',
+        'button[aria-label*="Stop"]',
+        '[aria-label*="停止生成"]',
+        '[class*="stop-generat"]',
+        '[data-testid*="stop"]'
+      ];
+      for (let i = 0; i < sel.length; i++) {
+        if (document.querySelector(sel[i])) return true;
+      }
+      return false;
+    } catch (e) {
+      return false;
+    }
+  }
+
   function watchAnswer(title, batchId, baseSig) {
     if (window.__bnWatching) return; // 同一页面只监控一次，防止多实例重复写文件
     window.__bnWatching = true;
@@ -1447,6 +1468,8 @@
     let staleLog = 0;
     let titleLog = 0;
     let mismScene = false; // 出现过"标题不一致"（疑似上一条），超时时据此给出准确提示
+    let confirmHit = 0; // v3.8.6：判定达标要连续两次采样都成立才落盘（多给一轮，防半截）
+    let genStuck = 0;   // v3.8.6：连续命中"生成中"的次数，超过 40 轮判定为选择器误判并放行
     const release = () => { window.__bnWatching = false; };
     // 修正轮回答只有 [mm:ss] 行、没有笔记标题，不做标题校验
     const isFix = () => !!window.__bnFixBase;
@@ -1515,6 +1538,13 @@
           console.log('[B站笔记助手] 文本回升，取消骤降判定（渲染抖动），继续监控');
         } else if (guard - pendingDrop.guard >= 1) {
           const isFixRound = !!(window.__bnFixBase);
+          // v3.8.6：骤降确认时若豆包仍在生成，不判完成（否则半截笔记会立刻触发公式修正）
+          if (!isFixRound && isGenerating()) {
+            pendingDrop = null;
+            console.log('[B站笔记助手] 文本骤降但豆包仍在生成中，取消完成判定，继续等待');
+            setTimeout(tick, 3000);
+            return;
+          }
           const target = isFixRound ? (t || answer) : answer;
           const titlePass = titleOk(target);
           if (!isFixRound && target && !titlePass && titleLog++ % 5 === 0) {
@@ -1559,22 +1589,47 @@
       }
       // 完整笔记通常超过 200 字；短文本（状态提示、占位）不判定完成
       // v3.7.57：修正轮用宽松条件（短回答也判定，合并回原笔记）
-      // v3.7.93：专家模式稳定阈值 20 → 8（3 秒一 tick，即 24 秒无变化就落盘，原来要等 60 秒）；
-      // 普通模式保持 4（12 秒）。豆包长笔记的停顿一般不超过 20 秒，24 秒足够区分"还在写"和"写完了"
+      // v3.7.93：专家模式稳定阈值 20 -> 8（3 秒一 tick，即 24 秒无变化就落盘）
+      // v3.8.6：①页面上还有"停止生成"就以还在写对待，文本停多久都不判定完成——这是"输出一半就开始改公式"的根因
+      //        ②长笔记（>=1200 字）稳定阈值再 +6（普通 30 秒 / 专家 42 秒），短笔记仍 12 / 24 秒
+      //        ③判定达标要连续两次采样都成立才落盘，多给一轮确认
       const isFixRound = !!window.__bnFixBase;
-      const stableNeed = (window.__bnExpertMode === true) ? 8 : 4;
+      if (!isFixRound && isGenerating()) {
+        genStuck++;
+        if (genStuck <= 40) {
+          if (t) answer = t;
+          confirmHit = 0;
+          console.log('[B站笔记助手] 豆包仍在生成中（第 ' + genStuck + ' 次），继续等待，不落盘');
+          setTimeout(tick, 3000);
+          return;
+        }
+        genStuck = 0;
+        console.log('[B站笔记助手] 生成检测连续 40 轮仍命中，疑似选择器误判，放行本轮判定');
+      }
+      const baseNeed = (window.__bnExpertMode === true) ? 8 : 4;
+      const stableNeed = baseNeed + ((answer || '').length >= 1200 ? 6 : 0);
       const titlePass = titleOk(answer);
       if (!isFixRound && answer && !titlePass && titleLog++ % 5 === 0) {
         mismScene = true;
         console.log('[B站笔记助手] 回答标题与本次视频不一致（疑似上一条），暂不保存：' + noteTitleOf(answer) + ' ≠ ' + title);
       }
-      if (!pendingDrop && (isFixRound ? (stable >= 2 && looksLikeFixAnswer(answer)) : (answer.length > 200 && stable >= stableNeed && sig(answer) !== lastSavedSig && !looksLikeUserMsg(answer) && looksLikeNote(answer) && titlePass))) {
+      const hitOk = isFixRound
+        ? (stable >= 2 && looksLikeFixAnswer(answer))
+        : (answer.length > 200 && stable >= stableNeed && sig(answer) !== lastSavedSig && !looksLikeUserMsg(answer) && looksLikeNote(answer) && titlePass);
+      if (!pendingDrop && hitOk) {
+        confirmHit++;
+        if (confirmHit < 2) {
+          console.log('[B站笔记助手] 判定达标，再确认一轮（连续两次采样都不变才落盘）');
+          setTimeout(tick, 3000);
+          return;
+        }
         lastSavedSig = sig(answer);
         console.log('[B站笔记助手] 判定完成，尝试写入 Obsidian，内容长度=' + answer.length);
         finishAnswer(answer, title, batchId);
         release();
         return;
       }
+      if (!hitOk) confirmHit = 0;
       setTimeout(tick, 3000);
     };
     setTimeout(tick, 4000);
