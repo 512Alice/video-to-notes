@@ -949,10 +949,12 @@
   // 豆包整理完成后，把回答保存到 Obsidian；未配置 Obsidian 时静默，其他失败复制兜底
   // 把笔记里的 ```latex 代码块转成 Obsidian 原生公式（$$...$$），由 Obsidian 内置 MathJax 渲染。
   // 零依赖、零网络、零第三方插件：Obsidian 内置渲染器必然可用，公式必然显示。
+  // v3.8.7：豆包实际输出并不总是 ```latex 小写——也出现 ```LaTeX / ```tex / ```math、无语言标记的纯公式块、
+  // 未闭合的块（回答被截断）、以及把公式塞进行内反引号 `V=-IR_B+V_{BB}` 的情况。这些都统一转成 $$ / $。
   function latexBlocksToDisplay(md) {
-    return String(md || '').replace(/```latex\s*\n([\s\S]*?)```/g, (m, body) => {
-      let inner = body.replace(/\s+$/g, '').trim();
-      if (!inner) return m;
+    const wrapBlock = (body) => {
+      let inner = String(body || '').replace(/\s+$/g, '').trim();
+      if (!inner) return null;
       // 去掉可能存在的完整 LaTeX 文档外壳（documentclass/usepackage/begin/end document）
       inner = inner
         .replace(/\\documentclass[^\n]*\n?/g, '')
@@ -963,8 +965,81 @@
       inner = inner.replace(/^\$\$?|\$\$?$/g, '').trim();
       // v3.7.50：块内若嵌套了 $...$（豆包在 ```latex 块内又包 $），去掉多余 $，保留内部 LaTeX
       inner = inner.replace(/\$([\s\S]*?)\$/g, '$1').trim();
+      if (!inner) return null;
       return '\n$$\n' + inner + '\n$$\n';
-    });
+    };
+
+    // 语言标记：latex / LaTeX / LATEX / tex / TeX / math / mathjax（大小写不限，标记后可无换行直接跟内容）
+    const LANG = '```[ \\t]*(?:latex|LaTeX|LATEX|tex|TeX|math|mathjax|MathJax)[ \\t]*(?:\\r?\\n|([ \\t]+))';
+
+    return String(md || '')
+      // ① 带语言标记、正常闭合的块
+      .replace(new RegExp(LANG + '([\\s\\S]*?)```', 'gi'), (m, sp, body) => wrapBlock(body) || m)
+      // ② 无语言标记、但内容明显是纯公式的块（无中文，含 \\命令 或 _{...}/^{...}）
+      .replace(/```[ \t]*\r?\n([\s\S]*?)```/g, (m, body) => {
+        const t = String(body || '').trim();
+        if (!t) return m;
+        if (/[一-鿿]/.test(t)) return m;
+        if (!/\\[a-zA-Z]{2,}|[_^]\{/.test(t)) return m;
+        return wrapBlock(body) || m;
+      })
+      // ③ 未闭合的带标记块（回答被截断在半截代码块里）：只吃到"第一行中文正文"之前，
+      // 后面的中文段落留在块外，避免把整篇笔记都塞进 $$ 里
+      .replace(new RegExp(LANG + '([\\s\\S]*)$', 'gi'), (m, sp, body) => {
+        const lines = String(body || '').split('\n');
+        let stop = lines.length;
+        for (let i = 0; i < lines.length; i++) {
+          const l = lines[i].trim();
+          if (!l) continue;
+          if (/[一-鿿]/.test(l)) {
+            stop = i;
+            break;
+          }
+        }
+        const blockBody = lines.slice(0, stop).join('\n');
+        const rest = lines.slice(stop).join('\n');
+        const converted = wrapBlock(blockBody);
+        if (!converted) return m;
+        return converted + (rest ? '\n' + rest.replace(/^(\r?\n)+/, '') : '');
+      })
+      // ④ 行内反引号里的纯公式：`V=-IR_B+U_I+V_{BB}` → $...$
+      .replace(/`([^`\n]{2,240})`/g, (m, body) => {
+        const t = String(body || '').trim();
+        if (!t || /[一-鿿]/.test(t)) return m;
+        if (!/\\[a-zA-Z]{2,}|[_^]\{/.test(t)) return m;
+        if (/\$/.test(t)) return m;
+        return '$' + t + '$';
+      });
+  }
+
+  // v3.8.7：豆包有时把公式直接写成一行裸 LaTeX（不包 $、不套代码块），Obsidian 里就原样显示成
+  // "U_{I}=0" 这种源码。这里把"整行就是一个公式"的行就地包成 $...$，比再发一轮修正请求快也更稳。
+  // 只处理：无 $、无中文、字符集全是公式符号、且含 = 或 \命令 的行；代码块 / $$ 块内部一律不动。
+  function wrapBareLatexLines(md) {
+    const lines = String(md || '').split('\n');
+    let inFence = false;
+    let inDisplay = false;
+    return lines.map((ln) => {
+      if (/^\s*```/.test(ln)) {
+        inFence = !inFence;
+        return ln;
+      }
+      if (inFence) return ln;
+      const lead = (ln.match(/^\s*(?:[-*+]\s+|\d+[.)]\s+)?/) || [''])[0];
+      const core = ln.slice(lead.length).trim();
+      if (!core) return ln;
+      if (core.indexOf('$$') === 0) {
+        inDisplay = !inDisplay;
+        return ln;
+      }
+      if (inDisplay) return ln;
+      if (core.indexOf('$') >= 0) return ln;
+      if (/[一-鿿，。；：、！？]/.test(core)) return ln;
+      if (!/\\[a-zA-Z]{2,}|[_^]\{/.test(core)) return ln;
+      if (!/=|\\/.test(core)) return ln;
+      if (!/^[A-Za-z0-9\s_^{}\\+\-*/=<>().,;:'[\]|]+$/.test(core)) return ln;
+      return lead + '$' + core + '$';
+    }).join('\n');
   }
 
   // v3.7.97：行内公式收尾规整——修掉逐符号转换遗留的三类坏形态：
@@ -1280,11 +1355,19 @@
     // 于是每篇笔记都被判定"有残留"→ 反复发修正请求 → 多等几十秒。这是"莫名其妙反复修正"的根因。
     const hits = [];
     let inFence = false;
+    let inDisplay = false; // v3.8.7：$$ 块内的行不算残留——此前只认 ``` 围栏，导致合法块级公式里的
+                           // V_{BB}、R_B 被当成"裸下标"→ 每篇笔记都被判残留 → 反复发修正请求
     for (const line of String(md || '').split('\n')) {
       const t0 = line.trim();
       if (/^(```|~~~)/.test(t0)) { inFence = !inFence; continue; }
       if (inFence) continue; // 代码块/公式块内部一律不管（合法 LaTeX 就写在这里）
       if (!t0) continue;
+      const dd = (t0.match(/\$\$/g) || []).length;
+      if (dd) {
+        if (dd % 2 === 1) inDisplay = !inDisplay; // 独占一行的 $$ 作为块围栏切换
+        continue; // 该行本身就是公式（或 $$ 包裹），不判残留
+      }
+      if (inDisplay) continue;
       const plain = line
         .replace(/\$\$[\s\S]*?\$\$/g, ' ')
         .replace(/\$[^$\n]*\$/g, ' ')
@@ -1295,7 +1378,9 @@
       // 2) 裸希腊字母
       if (/[αβγδθλμφψωσπτνκηξε]/.test(plain)) { hits.push(t0.slice(0, 80)); continue; }
       // 3) 未包 $ 的裸下标写法（V_GS、U_CE、I_B）
-      if (/(?<![A-Za-z0-9_$\\])[A-Za-z]{1,3}_[A-Za-z0-9]{1,4}(?![A-Za-z0-9])/.test(plain)) { hits.push(t0.slice(0, 80)); continue; }
+      // v3.8.7：中文句子里顺带提到的裸下标（"令 U_I 等于零"）在 Obsidian 里只是显示为文本，不算渲染硬错误，
+      // 不再计入残留——否则一句通俗解释就能凑够 2 行，又把修正请求发出去。
+      if (!/[一-鿿]/.test(plain) && /(?<![A-Za-z0-9_$\\])[A-Za-z]{1,3}_[A-Za-z0-9]{1,4}(?![A-Za-z0-9])/.test(plain)) { hits.push(t0.slice(0, 80)); continue; }
       // 4) 未包 $ 的"符号 = 数值"（VGS=3.5、R1=10）
       if (/(?<![A-Za-z0-9$\\])[A-Z]{1,4}[a-z]{0,2}\d{0,2}\s*=\s*[-+]?[0-9]/.test(plain)) { hits.push(t0.slice(0, 80)); continue; }
     }
@@ -1357,7 +1442,7 @@
     // v3.7.45：修复 callout 折叠渲染 + 清理尾部自问自答 + 补回标题行
     // v3.7.87：skipConvert=true 用于保存"已转换过的原稿"（如修正轮超时回退），避免二次转换
     if (!skipConvert) {
-      content = inlineSymbolsToMath(latexBlocksToDisplay(mindmapToTD(fixCallouts(content))));
+      content = wrapBareLatexLines(inlineSymbolsToMath(latexBlocksToDisplay(mindmapToTD(fixCallouts(content)))));
       if (!/^# 《/.test(content)) content = '# 《' + (title || 'B站笔记') + '》\n\n' + content;
     }
     // v3.7.57：定向反馈闭环（替代 v3.7.56 的整篇重发）——本地消毒器先做掉有限形状，
@@ -1377,7 +1462,7 @@
     // v3.7.99：写盘前对最终全文再做一次消毒。修正行是豆包手写的，可能自带碎片 $、行内 `$$`，
     // 合并回原笔记后不会再经过转换管线；这是"改了还有乱码"的最后一个漏点。
     // 消毒是幂等的（合法公式逐字不变），skipConvert 的已转换原稿再跑一遍也不会被改坏。
-    content = sanitizeInlineMath(content);
+    content = wrapBareLatexLines(sanitizeInlineMath(content));
     const residue = detectMathResidue(content);
     const rounds = window.__bnFixRounds || 0;
     // v3.7.93：单行残留不值得再等豆包一轮（本地消毒器已经尽力），只有 ≥2 行明显硬错误才发修正请求
