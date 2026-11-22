@@ -907,22 +907,84 @@ async function fetchSubtitleFromOpenTab() {
 //   ① 复用只复用「同一视频、同一分P」的已开视频页（就是你正在看的那个页面），其他 B 站页面一律不用；
 //   ② 无匹配页时精确打开带 p 参数的目标视频页，等页面数据就绪（__INITIAL_STATE__ 的 bvid 匹配）才抓；
 //   ③ 抓取函数改用页面自身 location.href 解析 bvid/p（不再依赖传入链接），杜绝"不知道字幕从哪来"。
+  // v3.8.7：与 content-doubao.js 同一份逻辑——豆包会输出 ```latex / ```LaTeX / ```tex / ```math、
+  // 无语言标记的纯公式块、被截断的未闭合块，以及行内反引号 `V=-IR_B+V_{BB}`，统一转成 $$ / $。
   function latexBlocksToDisplay(md) {
-    return String(md || '').replace(/```latex\s*\n([\s\S]*?)```/g, (m, body) => {
-      let inner = body.replace(/\s+$/g, '').trim();
-      if (!inner) return m;
-      // 去掉可能存在的完整 LaTeX 文档外壳（documentclass/usepackage/begin/end document）
+    const wrapBlock = (body) => {
+      let inner = String(body || '').replace(/\s+$/g, '').trim();
+      if (!inner) return null;
       inner = inner
         .replace(/\\documentclass[^\n]*\n?/g, '')
         .replace(/\\usepackage\{[^}]*\}[^\n]*\n?/g, '')
         .replace(/\\begin\{document\}[^\n]*\n?|\n?\\end\{document\}/g, '')
         .trim();
-      // 去掉可能包裹的单个 $ 或 $$（如此前版本包装的 $公式$）
       inner = inner.replace(/^\$\$?|\$\$?$/g, '').trim();
-      // v3.7.50：块内若嵌套了 $...$（豆包在 ```latex 块内又包 $），去掉多余 $，保留内部 LaTeX
       inner = inner.replace(/\$([\s\S]*?)\$/g, '$1').trim();
+      if (!inner) return null;
       return '\n$$\n' + inner + '\n$$\n';
-    });
+    };
+    const LANG = '```[ \\t]*(?:latex|LaTeX|LATEX|tex|TeX|math|mathjax|MathJax)[ \\t]*(?:\\r?\\n|([ \\t]+))';
+    return String(md || '')
+      .replace(new RegExp(LANG + '([\\s\\S]*?)```', 'gi'), (m, sp, body) => wrapBlock(body) || m)
+      .replace(/```[ \t]*\r?\n([\s\S]*?)```/g, (m, body) => {
+        const t = String(body || '').trim();
+        if (!t) return m;
+        if (/[一-鿿]/.test(t)) return m;
+        if (!/\\[a-zA-Z]{2,}|[_^]\{/.test(t)) return m;
+        return wrapBlock(body) || m;
+      })
+      .replace(new RegExp(LANG + '([\\s\\S]*)$', 'gi'), (m, sp, body) => {
+        const lines = String(body || '').split('\n');
+        let stop = lines.length;
+        for (let i = 0; i < lines.length; i++) {
+          const l = lines[i].trim();
+          if (!l) continue;
+          if (/[一-鿿]/.test(l)) {
+            stop = i;
+            break;
+          }
+        }
+        const blockBody = lines.slice(0, stop).join('\n');
+        const rest = lines.slice(stop).join('\n');
+        const converted = wrapBlock(blockBody);
+        if (!converted) return m;
+        return converted + (rest ? '\n' + rest.replace(/^(\r?\n)+/, '') : '');
+      })
+      .replace(/`([^`\n]{2,240})`/g, (m, body) => {
+        const t = String(body || '').trim();
+        if (!t || /[一-鿿]/.test(t)) return m;
+        if (!/\\[a-zA-Z]{2,}|[_^]\{/.test(t)) return m;
+        if (/\$/.test(t)) return m;
+        return '$' + t + '$';
+      });
+  }
+
+  // v3.8.7：整行裸 LaTeX（无 $、无中文）就地包成 $...$；代码块与 $$ 块内部不动。
+  function wrapBareLatexLines(md) {
+    const lines = String(md || '').split('\n');
+    let inFence = false;
+    let inDisplay = false;
+    return lines.map((ln) => {
+      if (/^\s*```/.test(ln)) {
+        inFence = !inFence;
+        return ln;
+      }
+      if (inFence) return ln;
+      const lead = (ln.match(/^\s*(?:[-*+]\s+|\d+[.)]\s+)?/) || [''])[0];
+      const core = ln.slice(lead.length).trim();
+      if (!core) return ln;
+      if (core.indexOf('$$') === 0) {
+        inDisplay = !inDisplay;
+        return ln;
+      }
+      if (inDisplay) return ln;
+      if (core.indexOf('$') >= 0) return ln;
+      if (/[一-鿿，。；：、！？]/.test(core)) return ln;
+      if (!/\\[a-zA-Z]{2,}|[_^]\{/.test(core)) return ln;
+      if (!/=|\\/.test(core)) return ln;
+      if (!/^[A-Za-z0-9\s_^{}\\+\-*/=<>().,;:'[\]|]+$/.test(core)) return ln;
+      return lead + '$' + core + '$';
+    }).join('\n');
   }
 
   // v3.7.97：行内公式收尾规整（与 content-doubao.js 同一份逻辑）——清花括号内 $、合并纯数学碎片、修半包
@@ -1685,24 +1747,123 @@ function fidelityWarn(note, raw) {
     list.slice(0, 3).join('、') + '），可能被编造，请对照文末原始字幕核对';
 }
 
+  // v3.8.7：与 content-doubao.js 同一份逻辑——"关键节点"若被写成一整篇逐条字幕摘要，
+  // 按 45 秒最小间隔 + 16 条上限抽稀；紧跟被删节点的截图一并删除，避免孤图。
+  function trimKeyNodes(md, maxCount) {
+    const limit = maxCount || 16;
+    const lines = String(md || '').split('\n');
+    let start = -1;
+    let end = lines.length;
+    let level = 0;
+    for (let i = 0; i < lines.length; i++) {
+      const m = lines[i].match(/^(#{1,6})\s/);
+      if (m && /关键节点|关键时间点|时间节点|关键画面节点/.test(lines[i])) {
+        start = i;
+        level = m[1].length;
+        for (let j = i + 1; j < lines.length; j++) {
+          const m2 = lines[j].match(/^(#{1,6})\s/);
+          if (m2 && m2[1].length <= level) {
+            end = j;
+            break;
+          }
+        }
+        break;
+      }
+    }
+    if (start < 0) return md;
+    const tsRe = /^(\s*)(?:[-*]\s+)?\[(\d{1,2}):(\d{2})\]/;
+    const idx = [];
+    const secs = [];
+    for (let i = start + 1; i < end; i++) {
+      const m = lines[i].match(tsRe);
+      if (m) {
+        idx.push(i);
+        secs.push((+m[2]) * 60 + (+m[3]));
+      }
+    }
+    if (idx.length <= limit) return md;
+    const keep = [];
+    let last = -999;
+    for (let k = 0; k < idx.length; k++) {
+      if (secs[k] - last >= 45) {
+        keep.push(k);
+        last = secs[k];
+      }
+    }
+    let picked = keep;
+    if (picked.length > limit) {
+      const step = picked.length / limit;
+      picked = [];
+      for (let k = 0; k < limit; k++) picked.push(keep[Math.floor(k * step)]);
+    }
+    const drop = [];
+    for (let k = 0; k < idx.length; k++) if (picked.indexOf(k) < 0) drop.push(idx[k]);
+    const removed = new Set(drop);
+    for (const i of drop) {
+      let j = i + 1;
+      while (j < end && lines[j].trim() === '') j++;
+      if (j < end && /^!\[\[/.test(lines[j].trim())) removed.add(j);
+    }
+    return lines.filter((_, i) => !removed.has(i)).join('\n');
+  }
+
+// v3.8.11：模型偶尔把同一篇笔记输出两遍（长回答续写时常见）——第二份从「整理说明」或「一、核心要点」重新开始。
+// 只保留第一份：在第一个「核心要点」标题之后，若再次出现"整理说明"或"核心要点"标题，就在那里截断。
+// 正常笔记这两个锚点各只出现一次（整理说明在核心要点之前），所以不会误伤。
+function trimDuplicateNote(md) {
+  const t = String(md || '');
+  const sec = t.search(/##\s*(?:[一二三四五六七八九十]+、)?核心要点/);
+  if (sec < 0) return t;
+  const after = t.slice(sec + 1);
+  const m = /\[!info\][^\n]*整理说明|##\s*(?:[一二三四五六七八九十]+、)?核心要点/.exec(after);
+  if (!m) return t;
+  return t.slice(0, sec + 1 + m.index).replace(/\s+$/g, '');
+}
+
+// v3.8.12：去掉正文与术语表里的"（字幕“……”）”听写标注（幂等，别的都不动）
+function stripSubsAnnotations(md) {
+  const t = String(md || '');
+  return t
+    .replace(/[ \t]*[（(]\s*字幕\s*[“"][^”"\n]{0,80}[”"]\s*[）)]/g, (m, off, whole) => {
+      const l = whole[off - 1] || '';
+      const r = whole[off + m.length] || '';
+      return (/[$A-Za-z0-9)）]/.test(l) && /[\u4e00-\u9fa5（(]/.test(r)) ? ' ' : '';
+    })
+    .replace(/[ \t]+(?=[，。；、：])/g, '');
+}
+
 async function saveNoteToObsidian({ title, content, preprocessed, attachSubs }) {
   content = String(content || '');
+  // v3.8.11：先把"模型重复输出的第二份笔记"截掉（幂等，正常笔记原样返回）
+  content = trimDuplicateNote(content);
+  content = stripSubsAnnotations(content);
   // v3.7.87：自动流程的公式转换已在 content script 的 finishAnswer 中完成（preprocessed=true），
   // 这里不再重复跑——同一套启发式规则跑两遍会二次误伤公式。手动保存/旧版内容脚本没有转换流程，仍在此兜底。
   if (!preprocessed) {
-    content = inlineSymbolsToMath(latexBlocksToDisplay(mindmapToTD(fixCallouts(content))));
+    content = wrapBareLatexLines(inlineSymbolsToMath(latexBlocksToDisplay(mindmapToTD(fixCallouts(content)))));
   }
   // v3.7.81：纯文本分数（24/49、7/8 等，豆包回答渲染丢失 annotation 或字幕直出文本分数）→ LaTeX \frac{}{}，
   // 防止存成 "4924" 这种粘连数字；已是 \frac 的不会被匹配（无裸 数字/数字）；日期（如 2026/10/31）前有 / 或数字，也不误伤
   // v3.7.87：包上 $...$——裸 \frac 在 Obsidian 中不渲染；已在 $...$ 内的数字/数字不会命中（前导 $ 被排除）
   content = content.replace(/(?<![A-Za-z0-9_{}\\$/])(\d{1,3})\s*\/\s*(\d{1,3})(?![A-Za-z0-9_}\\$])/g, (m, a, b) => (+b === 0 ? m : '$\\frac{' + a + '}{' + b + '}$'));
+  // v3.8.7：兜一道裸公式行（幂等：已带 $ 的行不动），保证旧版内容脚本/手动保存也能渲染
+  content = wrapBareLatexLines(content);
+  // v3.8.7：关键节点抽稀（幂等：条目不多时原样返回），与内容脚本同一逻辑
+  content = trimKeyNodes(content, 16);
   // v3.7.82：过滤脏行——豆包未执行模板而把格式要求当正文输出（"标题，展开 2~4 条…"等）、
   // 以及抓进笔记的豆包界面残留（"展开全部"按钮文案、页面时间戳"今天 14:47"）
   // v3.7.84：再加"朗读"按钮残留、用户手动发的「公式修正请求」整段模板（豆包回答区含用户消息时会被抓到）
-  content = content.split('\n').filter((ln) => {
+  // v3.8.7：先剥掉粘在行尾的页面残留（豆包会员按钮"免费"、时间戳"今天 23:00"），
+  // 真实坏例："故该负载线又叫直流负载线免费今天 23:00"。只处理"免费/今天时间"这类连尾形态，不动正文。
+  content = content.split('\n').map((ln) => ln
+    .replace(/\s*免费\s*今天\s*\d{1,2}:\d{2}\s*$/, '')
+    .replace(/\s*今天\s*\d{1,2}:\d{2}\s*$/, '')
+  ).filter((ln) => {
     const l = ln.trim();
     if (!l) return true;
     if (/展开全部|收起全部/.test(l)) return false;
+    // v3.8.11：代码块工具栏按钮文案粘在语言标记后面（真机坏例："latex复制下载"）
+    if (/^(?:latex|tex|math|mathjax|mermaid|python|py|js|javascript|ts|typescript|c|cpp|java|bash|sh|shell|json|html|css|xml|yaml|text|plaintext)(?:复制|下载|Copy|Download)+$/i.test(l)) return false;
     if (/^朗读\s*(朗读\s*)*$/.test(l)) return false;
     if (/^今天\s*\d{1,2}:\d{2}$/.test(l)) return false;
     if (/标题，展开|只输出缺失部分|不要输出任何多余解释|不要重复已生成的内容|按 \[mm:ss\] 内容|呈现核心知识结构|该板块详细讲解|板块标题/.test(l)) return false;
@@ -1824,10 +1985,13 @@ async function saveNoteToObsidian({ title, content, preprocessed, attachSubs }) 
 }
 
 // 用 CDP（chrome.debugger）向豆包页发送真实回车（合成键盘事件 React 不响应，此事件 isTrusted=true）
-async function pressEnterReal() {
-  const tabs = await chrome.tabs.query({ url: 'https://www.doubao.com/*' });
+// v3.8.9：按平台定位目标标签页（豆包 / DeepSeek），回车发送交给 CDP 发真实事件
+async function pressEnterReal(platform) {
+  const isDs = platform === 'deepseek';
+  const pattern = isDs ? 'https://chat.deepseek.com/*' : 'https://www.doubao.com/*';
+  const tabs = await chrome.tabs.query({ url: pattern });
   const tab = tabs.find((t) => !t.pinned);
-  if (!tab || tab.id == null) return { ok: false, error: '未找到豆包标签页' };
+  if (!tab || tab.id == null) return { ok: false, error: isDs ? '未找到 DeepSeek 标签页' : '未找到豆包标签页' };
   try {
     await chrome.debugger.attach({ tabId: tab.id }, '1.3');
     // CDP 回车前先聚焦输入框（tab 刚激活/欢迎页切换时焦点可能不在输入框，回车会落空）
@@ -1855,6 +2019,79 @@ async function pressEnterReal() {
 // 这里自动推进到下一个链接；app 页轮询到 bn_queue.current 变化后，把链接填进单条输入框并自动抓字幕。
 const QUEUE_KEY = 'bn_queue';
 
+// v3.8.14：整理指令模板的唯一实现；扩展页通过消息 buildNotePrompt 取用，队列执行也直接调这里
+function buildNotePrompt(title, raw) {
+  return '你是学习笔记助手。请把下面这段视频字幕整理成一份结构清晰、内容充实的 Obsidian Markdown 学习笔记，' +
+        '直接输出笔记正文（Markdown 格式），不要输出任何多余的解释或标记。\n\n' +
+        '【保真铁律｜优先级高于下面所有格式要求】\n' +
+        '1) 字幕里的数字、时间、人名、专有名词、公式、条件限定（如“当…时”“仅在…”“约等于”）必须原样保留，不得改写、不得四舍五入、不得换同义词；\n' +
+        '2) 只允许删除无信息量的口语冗余（“这个”“那个”“我们来看一下”“对不对”）；删除不得丢失任何数据、结论或条件；\n' +
+        '3) 不确定的内容一律写成【疑问】，严禁编一个看起来合理的答案补上；\n' +
+        '4) 严禁编造字幕里没有的时间戳；“关键节点”里的 [mm:ss] 必须逐条取自字幕原文。\n\n' +
+        '笔记结构严格按下面六个板块输出，板块顺序和标题文字都不要改：\n\n' +
+        '# 《' + (title || '未识别') + '》\n\n' +
+        '> [!info] 整理说明\n' +
+        '> 场景：学习笔记（讲解类）\n' +
+        '> 保真：数据、时间、专名、公式、条件限定均与字幕一致，未改写\n' +
+        '> 原文：字幕原文由插件附在笔记末尾，可随时对照\n\n' +
+        '## 一、思维导图（点击可展开）\n' +
+        '用可折叠的知识树呈现整段内容：每个核心板块一个可展开/收起的折叠块，点击标题即可展开该板块的详细解释。用 Obsidian callout 语法（渲染后是带标题的可折叠块）：\n' +
+        '- 结构：3~5 个板块，覆盖视频全部核心内容；板块标题 2~6 字（如 半导体类型、PN结特性、二极管参数）；\n' +
+        '- 每块展开内容为该板块的详细解释（2~4 条要点，每条把概念/原理/公式讲清楚，不要只列关键词）；\n' +
+        '- 格式示例如下（内容按本视频实际主题替换）：\n' +
+        '> [!note]- 半导体类型\n' +
+        '> - N型半导体：掺入磷原子，失电子成固定正离子，多子是电子\n' +
+        '> - P型半导体：掺入硼原子，俘获电子成固定负离子，多子是空穴\n' +
+        '> - 多子与少子：多子是主要载流子，少子数量极少\n' +
+        '（以上仅为格式示例，请按本视频实际内容生成）\n\n' +
+        '## 二、核心要点\n' +
+        '按主题分成若干小节（用 ### 小标题区分），每个小节用条目列出知识点。要求：\n' +
+        '- 覆盖字幕的全部主要内容，重要概念、公式、结论、原理展开讲清楚，不要只列关键词；\n' +
+        '- 涉及公式、参数、电路、代码的地方完整保留；所有公式一律用标准 LaTeX 写在 ```latex 代码块内（如 I_D=I_S(e^{U_D/U_T}-1)、r_d=U_T/I_DQ），不要用普通文字描述公式；多个公式必须用换行分隔、每个公式单独占一行，严禁把多个公式连写堆在一行（如 V_{BB}=I_{BQ}R_B+U_{BEQ} I_{CQ}=\\beta I_{BQ} 这类连堆是错误的，必须分行）；\n' +
+        '- 严禁用 Unicode 字符手写公式（如 ∑、∞、→、∂、≤、≥ 等），一律用 LaTeX 命令（\\sum、\\infty、\\to、\\partial、\\leq、\\frac、\\lim、\\int、\\sqrt、\\times）；严禁用 <sup>/<sub> HTML 标签表示上下标；\n' +
+        '- 上下标必须写成 LaTeX：下标用 _{...}（如 $z_n$、$U_{CE}$、$I_{DQ}$），上标用 ^{...}（如 $x^2$、$e^{x}$）；物理量符号一律写成行内公式 $...$（如 $I_S$、$U_T$、$r_d$、$U_{ON}$、$Q$），不要用纯文本字母、不要连写（如 zn 应写 $z_n$）；\n' +
+        '- 标准写法示例：级数 $\\sum_{n=1}^{\\infty} z_n$、极限 $\\lim_{N\\to+\\infty} S_N$、偏导数 $\\frac{\\partial^2\\varphi}{\\partial x^2}$、积分 $\\int_a^b f(x)\\,dx$、根式 $\\sqrt{x^2+y^2}$、小于等于 $\\le$；\n' +
+        '- 【严禁的写法】连写物理量符号（VGS、VDS、IDSS、zn、VGD 等均错误，必须写 $V_{GS}$、$V_{DS}$、$I_{DSS}$、$z_n$、$V_{GD}$）；带下划线的半转换写法（VG_D、I_D 等均错误，必须写 $V_{GD}$、$I_D$）；分子分母连写（如 VGS(off)VGS 错误，必须写 $\\frac{V_{GS}}{V_{GS(off)}}$）；括号后直接跟数字表示幂次（如 (1-...)2 错误，必须写 ^2）；\n' +
+        '- 上述公式规范对全文所有板块一律生效（核心要点、术语表、易错点与疑问、思维导图展开内容、关键节点都不例外），关键节点时间戳后的公式同样要写成标准 LaTeX；\n' +
+        '- 条目按逻辑顺序组织，层次分明；每个小节只写字幕里讲过的内容，不要补充视频外的知识（确有必要补充时标【补充】）；\n' +
+        '- 全文不要出现“（字幕“……”）”这类听写标注，也不要用“字幕提到 / 字幕说”来回引原话；听错的字直接写成正确的术语与公式，不要交代字幕原来念成什么。\n\n' +
+        '## 三、术语表\n' +
+        '只收录这条视频实际出现的术语，按首次出现顺序排列，每条一行：\n' +
+        '- **术语**：一句话解释它在这条视频里具体指什么\n' +
+        '要求：同一术语只出现一次；缩写首次出现要写全称（如 MCU（微控制器））；字幕把术语念成同音词或口音误读的，直接写成正确的规范形式，不要在术语后面加括号标注字幕原词、也不要写“字幕里叫成……”，原始字幕本来就附在文末；本条视频没有术语时保留板块标题并写“- 无”。\n\n' +
+        '## 四、易错点与疑问\n' +
+        '### 易错点\n' +
+        '- 视频里被明确强调的坑、容易混淆的概念、容易代错的条件（如“仅适用于小信号”“方向别反”）；只写视频里真讲到的，不要泛泛而谈。\n' +
+        '### 待查疑问\n' +
+        '- 【疑问】字幕没讲清、前后矛盾、或需要自己再查资料的点；只写问题，严禁编答案；没有就写“- 无”。\n\n' +
+        '## 五、关键节点\n' +
+        '从字幕里挑出真正关键的节点，只输出 10~16 条（字幕再长也不超过 20 条），每条只写下列情形之一：某概念第一次定义、关键结论、公式登场、易错提醒、方法/步骤转折。' +
+        '格式为 [mm:ss] 一句话（20 字以内，只写这个节点在做什么，不要复述/翻译字幕原句）。' +
+        '相邻两条至少间隔 45 秒，不要把同一段连续讲的几句话拆成多条；按时间顺序排列。' +
+        '每个时间戳必须是字幕原文里真实出现过的，不许自行换算或编造。' +
+        '文末会附完整字幕供追溯，这里不要再把字幕逐条搬一遍。\n\n' +
+        '字幕内容：\n' + raw;
+}
+
+// v3.8.14：把 "?p=1-8" / "?p=1~8" 展开成逐条链接（保留 &vd_source 等其余参数）
+// 放在 background 是唯一实现：扩展页把用户输入原样传上来，展开与校验都在这里做。
+function expandPRangeBg(line) {
+  const s = String(line || '').trim();
+  const m = s.match(/^(.*?)([?&])p=(\d+)\s*[-~]\s*(\d+)(.*)$/);
+  if (!m) return { list: [s] };
+  const base = m[1];
+  const sep = m[2];
+  const a = parseInt(m[3], 10);
+  const b = parseInt(m[4], 10);
+  const rest = m[5] || '';
+  if (!isFinite(a) || !isFinite(b) || a < 1 || b < 1) return { error: '分P 范围必须是从 1 开始的整数' };
+  if (b < a) return { error: '范围写反了（' + a + '-' + b + '），结束要大于等于开始' };
+  if (b - a + 1 > 50) return { error: '一次最多展开 50 个分P（' + a + '-' + b + ' 共 ' + (b - a + 1) + ' 个）' };
+  const list = [];
+  for (let i = a; i <= b; i++) list.push(base + sep + 'p=' + i + rest);
+  return { list };
+}
+
 function queueGet() {
   return new Promise((resolve) => chrome.storage.local.get([QUEUE_KEY], (it) => resolve(it[QUEUE_KEY] || null)));
 }
@@ -1875,31 +2112,219 @@ async function bnQueueSet(links) {
     }
     return '';
   };
-  const urls = (links || []).map(okOne).filter(Boolean);
-  if (!urls.length) return { ok: false, error: '没有有效链接（支持 B 站 / 小红书 / YouTube：BVxxxx、xiaohongshu.com/explore/xxxx、youtube.com/watch?v=xxxx）' };
+  const urls = [];
+  const errors = [];
+  (links || []).forEach((raw) => {
+    const t = String(raw || '').trim();
+    if (!t) return;
+    const ex = expandPRangeBg(t);
+    if (ex.error) { errors.push(t + '：' + ex.error); return; }
+    ex.list.forEach((u) => {
+      const ok = okOne(u);
+      if (ok) urls.push(ok); else errors.push(u + '：链接格式不对');
+    });
+  });
+  if (!urls.length) {
+    return { ok: false, error: '没有有效链接（支持 B 站 / 小红书 / YouTube：BVxxxx、xiaohongshu.com/explore/xxxx、youtube.com/watch?v=xxxx）' + (errors.length ? '｜' + errors.slice(0, 2).join('；') : '') };
+  }
+  if (urls.length > 50) return { ok: false, error: '一次最多 50 条（当前展开后 ' + urls.length + ' 条），请分批放' };
   await queueSet({ links: urls, index: -1, current: '', currentIndex: -1, active: false, lastMsg: '已放入 ' + urls.length + ' 个链接，点「开始逐个处理」' });
-  return { ok: true, count: urls.length };
+  return { ok: true, count: urls.length, errors: errors.slice(0, 3) };
+}
+
+
+// ---------- 队列自主执行（v3.8.14） ----------
+// 以前"抓字幕 → 拼整理指令 → 发送"都在扩展页里做。Edge 会冻结后台标签页的 JS，
+// 定时器和 storage 事件一起停摆，所以只有切回扩展页队列才往前走。现在整条链路在
+// background 里跑，扩展页只当看板，页面冻结也不影响推进。
+
+function fmtTimeBg(sec) {
+  sec = Math.max(0, Math.floor(Number(sec) || 0));
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+}
+
+function linesToRawBg(lines) {
+  return (lines || []).map((ln) => '[' + fmtTimeBg(ln && ln.t) + '] ' + String((ln && ln.text) || '')).join('\n');
+}
+
+function getPBg(url) {
+  const m = String(url || '').match(/[?&]p=(\d+)/);
+  return m ? m[1] : '';
+}
+
+function detectPlatBg(u) {
+  const s = String(u || '');
+  if (/bilibili\.com\/video\//.test(s)) return 'bili';
+  if (/(xiaohongshu\.com|rednote\.com)\/(explore|discovery\/item|item|discovery)\//.test(s)) return 'xhs';
+  if (/(youtube\.com\/watch|youtu\.be\/|youtube\.com\/shorts\/)/.test(s)) return 'yt';
+  return '';
+}
+
+function pickFrameTimesBg(lines) {
+  const KEY = /(这张图|图中|如图|看这里|看这个|看图|曲线|波形|特性曲线|电路|接线|接法|板子|示波|参数表|表格|示意图|画|这个位置)/;
+  const cand = [];
+  (lines || []).forEach((ln) => {
+    const t = Number(ln && ln.t);
+    if (!isFinite(t) || t <= 0) return;
+    if (!KEY.test(String((ln && ln.text) || ''))) return;
+    cand.push(Math.floor(t));
+  });
+  const out = [];
+  cand.forEach((sec) => { if (!out.some((x) => Math.abs(x - sec) < 25)) out.push(sec); });
+  if (out.length) return out.slice(0, 5);
+  const last = (lines && lines.length) ? Number(lines[lines.length - 1].t) : 0;
+  if (!isFinite(last) || last < 90) return [];
+  const picked = [];
+  for (let i = 1; i <= 4; i++) picked.push(Math.floor((last * i) / 5));
+  return picked;
+}
+
+function storageGetBg(keys) {
+  return new Promise((resolve) => chrome.storage.local.get(keys, (it) => resolve(it || {})));
+}
+
+// 按链接抓字幕。队列无人看守：B 站优先走接口（不依赖哪个页面在前台）；
+// 接口失败、且恰好开着这个视频的页面时，才退到页面内抓取。
+async function fetchSubsForAnyUrl(url) {
+  const kind = detectPlatBg(url);
+  if (kind === 'xhs') {
+    try { return await fetchSubtitleXhsFromTab(url); } catch (e1) { /* 页面没开，走接口 */ }
+    return await fetchSubtitleXhsByUrl(url);
+  }
+  if (kind === 'yt') {
+    try { return await fetchSubtitleYoutubeFromTab(url); } catch (e1) { /* 页面没开，走接口 */ }
+    return await fetchSubtitleYoutubeByUrl(url);
+  }
+  if (kind === 'bili') {
+    try {
+      return await fetchSubtitleByUrl({ url, p: getPBg(url) });
+    } catch (e1) {
+      const bv = (String(url).match(/\/video\/(BV[0-9A-Za-z]+)/) || [])[1];
+      if (!bv) throw e1;
+      const tabs = await new Promise((res) => chrome.tabs.query({ url: '*://*.bilibili.com/video/*' }, (t) => res(t || [])));
+      const hit = tabs.find((t) => t.url && t.url.indexOf(bv) >= 0);
+      if (!hit || hit.id == null) throw e1;
+      await chrome.tabs.update(hit.id, { active: true });
+      return await fetchSubtitleFromOpenTab();
+    }
+  }
+  throw new Error('链接不是 B 站 / 小红书 / YouTube：' + url);
+}
+
+// 执行一条：抓字幕 → 可选截关键画面 → 写待发送 → 打开整理页
+async function runQueueItem(url) {
+  // 先清掉上一条的截图，避免串到别的视频
+  await new Promise((res) => chrome.storage.local.set({ bn_frames: null }, () => res()));
+
+  let subs = null;
+  try {
+    subs = await fetchSubsForAnyUrl(url);
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
+  const lines = (subs && subs.lines) || [];
+  if (!lines.length) return { ok: false, error: '没抓到字幕（该视频可能没有字幕）' };
+  const title = (subs && subs.title) || '';
+  const raw = linesToRawBg(lines);
+  if (!raw) return { ok: false, error: '字幕为空' };
+
+  const cfg = await storageGetBg(['bn_frames_on', 'bn_ai_platform']);
+  let shot = 0;
+  if (cfg.bn_frames_on === true && /bilibili\.com\/video\//.test(url)) {
+    try {
+      const times = pickFrameTimesBg(lines);
+      if (times.length) {
+        const cap = await captureVideoFrames({ times, videoUrl: url, title });
+        if (cap && cap.frames && cap.frames.length) {
+          await new Promise((res) => chrome.storage.local.set({ bn_frames: { frames: cap.frames, url, at: Date.now() } }, () => res()));
+          shot = cap.frames.length;
+        }
+      }
+    } catch (e) { /* 截图失败不影响文字笔记 */ }
+  }
+
+  const plat = cfg.bn_ai_platform === 'deepseek' ? 'deepseek' : 'doubao';
+  const aiName = plat === 'deepseek' ? 'DeepSeek' : '豆包';
+  await new Promise((res) => chrome.storage.local.set({
+    bn_pending_submit: { text: buildNotePrompt(title, raw), title, ts: Date.now(), platform: plat },
+    bn_src_subs: { title, raw, url, at: Date.now() }
+  }, () => res()));
+
+  try {
+    if (plat === 'deepseek') await openDeepSeekTab(); else await openDoubaoTab();
+  } catch (e) {
+    return { ok: false, error: '打开 ' + aiName + ' 失败：' + ((e && e.message) || String(e)) };
+  }
+  return { ok: true, title, platform: plat, shot };
+}
+
+let queueRunning = false;
+let queuePendingAdvance = false;
+
+// 推进队列。执行完一条就停在这里等笔记落盘信号（content 保存完会发 bnNoteDone）。
+// 失败策略：记录原因、自动跳下一条；连续 2 条失败或已到最后一条则暂停。
+async function bnQueueAdvance() {
+  if (queueRunning) { queuePendingAdvance = true; return { ok: true, busy: true }; }
+  queueRunning = true;
+  let out = { ok: true };
+  try {
+    for (let guard = 0; guard < 60; guard++) {
+      const q = await queueGet();
+      if (!q || !q.links || !q.links.length) { out = { ok: true }; break; }
+      if (!q.active) { out = { ok: true, stopped: true }; break; }
+      const next = q.index + 1;
+      if (next >= q.links.length) {
+        await queueSet({ ...q, active: false, index: q.links.length, current: '', currentIndex: -1, lastMsg: '全部处理完毕（共 ' + q.links.length + ' 个）' });
+        out = { ok: true, done: true };
+        break;
+      }
+      const link = q.links[next];
+      await queueSet({ ...q, index: next, current: link, currentIndex: next, lastMsg: '第 ' + (next + 1) + '/' + q.links.length + ' 个：正在抓字幕…' });
+      const run = await runQueueItem(link);
+      if (run.ok) {
+        const q2 = await queueGet();
+        await queueSet({ ...q2, failCount: 0, lastMsg: '第 ' + (next + 1) + '/' + q2.links.length + ' 个已发送（《' + (run.title || '未识别') + '》' + (run.shot ? '，截图 ' + run.shot + ' 张' : '') + '），等笔记保存后自动继续' });
+        out = { ok: true, url: link, index: next, title: run.title };
+        break;
+      }
+      const q3 = await queueGet();
+      const fails = (q3.failCount || 0) + 1;
+      const more = next + 1 < q3.links.length;
+      const why = '第 ' + (next + 1) + '/' + q3.links.length + ' 个失败：' + run.error;
+      if (fails >= 2 || !more) {
+        const tail = fails >= 2 ? '连续 ' + fails + ' 条失败，已暂停（修好后点「开始」继续）' : '已是最后一条，队列停止';
+        await queueSet({ ...q3, failCount: fails, active: false, lastMsg: why + '｜' + tail });
+        out = { ok: false, error: run.error, paused: true, index: next };
+        break;
+      }
+      await queueSet({ ...q3, failCount: fails, lastMsg: why + '，自动跳过' });
+      out = { ok: false, error: run.error, index: next };
+    }
+  } finally {
+    queueRunning = false;
+    if (queuePendingAdvance) {
+      queuePendingAdvance = false;
+      setTimeout(() => { bnQueueAdvance().catch(() => {}); }, 1200);
+    }
+  }
+  return out;
 }
 
 async function bnQueueStart() {
   const q = await queueGet();
   if (!q || !q.links || !q.links.length) return { ok: false, error: '队列为空' };
-  await queueSet({ ...q, active: true, index: -1, current: '', currentIndex: -1, lastMsg: '开始逐个处理…' });
-  return bnQueueNext();
+  await queueSet({ ...q, active: true, index: -1, current: '', currentIndex: -1, failCount: 0, lastMsg: '开始逐个处理…' });
+  return bnQueueAdvance();
 }
 
-// 推进到下一个链接（由"笔记记录完成"信号或用户点「跳过当前」触发）
+// 手动「跳过当前」：把当前这条算作已过，直接推进到下一条（执行链在 bnQueueAdvance）
 async function bnQueueNext() {
   const q = await queueGet();
-  if (!q) return { ok: true };
-  const next = q.index + 1;
-  if (next >= q.links.length) {
-    await queueSet({ ...q, active: false, index: q.links.length, current: '', currentIndex: -1, lastMsg: '全部处理完毕（共 ' + q.links.length + ' 个）' });
-    return { ok: true, done: true };
-  }
-  const link = q.links[next];
-  await queueSet({ ...q, index: next, current: link, currentIndex: next, active: true, lastMsg: '第 ' + (next + 1) + '/' + q.links.length + ' 个' });
-  return { ok: true, url: link, index: next };
+  if (!q || !q.links || !q.links.length) return { ok: true };
+  if (q.active === false) return { ok: true };
+  return bnQueueAdvance();
 }
 
 async function bnQueueClear() {
@@ -1912,7 +2337,7 @@ async function bnQueueOnNoteDone(msg) {
   const q = await queueGet();
   if (!q || !q.active || q.currentIndex < 0) return { ok: true };
   await queueSet({ ...q, lastMsg: (msg && msg.ok ? '笔记已记录：' : '处理失败：') + ((msg && msg.title) || '第 ' + (q.currentIndex + 1) + ' 个') });
-  return bnQueueNext();
+  return bnQueueAdvance();
 }
 
 // 打开或切换到豆包网页（已打开则聚焦，未打开则新建标签页）
@@ -1930,6 +2355,29 @@ async function openDoubaoTab() {
       });
     } catch (e) {
       // 注入失败（极少见）：退回刷新页面，确保脚本生效
+      try { await chrome.tabs.reload(hit.id); } catch (e2) { /* 忽略 */ }
+    }
+    await chrome.tabs.update(hit.id, { active: true });
+    if (hit.windowId != null) await chrome.windows.update(hit.windowId, { focused: true });
+    return { alreadyOpen: true };
+  }
+  const created = await chrome.tabs.create({ url, active: true });
+  return { alreadyOpen: false, tabId: created.id };
+}
+
+// v3.8.9：打开或切换到 DeepSeek 网页（已打开则聚焦并补注入脚本，未打开则新建一个标签页）
+async function openDeepSeekTab() {
+  const url = 'https://chat.deepseek.com/';
+  const tabs = await chrome.tabs.query({ url: 'https://chat.deepseek.com/*' });
+  const hit = tabs.find((t) => !t.pinned);
+  if (hit && hit.id != null) {
+    // 与豆包同一份内容脚本：脚本内部按 location.hostname 判断平台，复用同一套发送/抓取/落盘逻辑。
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId: hit.id },
+        files: ['content-doubao.js']
+      });
+    } catch (e) {
       try { await chrome.tabs.reload(hit.id); } catch (e2) { /* 忽略 */ }
     }
     await chrome.tabs.update(hit.id, { active: true });
@@ -1966,10 +2414,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return await fetchSubtitleYoutubeFromTab(msg.url);
       case 'openDoubao':
         return await openDoubaoTab();
+      case 'openDeepSeek':
+        return await openDeepSeekTab();
       case 'pressEnterReal':
-        return await pressEnterReal();
+        return await pressEnterReal(msg.platform);
       case 'saveNoteToObsidian':
         return await saveNoteToObsidian({ title: msg.title, content: msg.content, preprocessed: msg.preprocessed === true, attachSubs: msg.attachSubs === true });
+      case 'buildNotePrompt':
+        return { ok: true, data: { text: buildNotePrompt(msg.title || '', msg.raw || '') } };
       case 'bnQueueSet':
         return await bnQueueSet(msg.urls || []);
       case 'bnQueueStart':

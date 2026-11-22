@@ -160,6 +160,20 @@ details summary {
 }
 .expert-opt input { width: 16px; height: 16px; accent-color: #00aeec; cursor: pointer; }
 
+/* v3.8.9：整理平台选择行（豆包 / DeepSeek 并存） */
+.ai-plat-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-bottom: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px dashed #e3e5e7;
+}
+.ai-plat-label { font-size: 13px; color: #61666d; font-weight: 600; }
+.ai-plat-row .expert-opt { gap: 6px; }
+.ai-plat-row .expert-opt input { accent-color: #00aeec; }
+
 footer {
   text-align: center;
   font-size: 12px;

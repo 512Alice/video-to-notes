@@ -10,7 +10,7 @@
   <div class="wrap">
     <header class="hero">
       <h1>视频学习笔记助手</h1>
-      <p class="sub">粘贴视频链接，一键把字幕发给豆包，免费生成 <b>六板块结构化笔记</b>（核心要点 · 术语表 · 易错点与疑问 · 思维导图 · 关键节点 · 原始字幕），并可自动存入 Obsidian</p>
+      <p class="sub">粘贴视频链接，一键把字幕发给豆包 / DeepSeek，免费生成 <b>六板块结构化笔记</b>（思维导图 · 核心要点 · 术语表 · 易错点与疑问 · 关键节点 · 原始字幕），并可自动存入 Obsidian</p>
     </header>
 
     <section class="card">
@@ -39,7 +39,12 @@
     </section>
 
     <section class="card send-card">
-      <label class="expert-opt">
+      <div class="ai-plat-row">
+        <span class="ai-plat-label">整理平台</span>
+        <label class="expert-opt"><input type="radio" name="bn-ai" value="doubao" id="bn-ai-doubao" checked> 豆包</label>
+        <label class="expert-opt"><input type="radio" name="bn-ai" value="deepseek" id="bn-ai-deepseek"> DeepSeek</label>
+      </div>
+      <label class="expert-opt" id="bn-expert-row">
         <input type="checkbox" id="bn-expert"> 豆包专家模式（深度思考，笔记更专业；等待时长延长至约 1 分钟）
       </label>
       <label class="expert-opt">
@@ -51,10 +56,10 @@
       <button id="bn-send" class="primary big" disabled>发送到豆包整理（六板块结构化笔记）</button>
       <button id="bn-debug" class="secondary big">🔧 调试：用内置测试字幕发送（免B站登录）</button>
       <p class="tip">
-        前提：请在 Edge 中登录豆包网页 <b>www.doubao.com</b>（登录一次即可）。<br>
-        点击后会自动打开豆包并发送，豆包输出六板块：① 核心要点 ② 术语表 ③ 易错点与疑问 ④ 思维导图（可折叠）⑤ 关键节点时间表 ⑥ 原始字幕（插件自动附在文末，可对照）。
+        前提：请在 Edge 中登录所选平台（豆包 <b>www.doubao.com</b> 或 DeepSeek <b>chat.deepseek.com</b>），登录一次即可。<br>
+        点击后会自动打开该平台并发送，模型输出六板块：① 思维导图（可折叠，先看结构）② 核心要点 ③ 术语表 ④ 易错点与疑问 ⑤ 关键节点时间表 ⑥ 原始字幕（插件自动附在文末，可对照）。
         保真优先：字幕里的数字、时间、专名、公式原样保留，不确定的内容只写成【疑问】不编答案。<br>
-        若下方 Obsidian 已配置，整理完成后笔记会<b>自动写入 Obsidian</b>；未配置则只在豆包页查看，可在对话框继续发截图补充。
+        若下方 Obsidian 已配置，整理完成后笔记会<b>自动写入 Obsidian</b>；未配置则只在对话页查看，可在对话框继续发截图补充。
       </p>
     </section>
 
@@ -81,15 +86,15 @@
     </section>
 
     <section class="card">
-      <h2 class="sec-title">链接队列（记完一个笔记，自动把下一个链接填到上方输入框）</h2>
-      <textarea id="bn-queue-input" rows="4" placeholder="每行粘贴一个视频链接（B站 / 小红书 / YouTube 可混排）。点「开始逐个处理」后：第 1 个链接自动填入上方输入框并抓取字幕 → 你核对后点「发送到豆包」→ 笔记记完自动把下一个链接填进来，逐个完成"></textarea>
+      <h2 class="sec-title">链接队列（后台自动跑：抓字幕 → 发送 → 记完接着下一条）</h2>
+      <textarea id="bn-queue-input" rows="4" placeholder="每行粘贴一个视频链接（B站 / 小红书 / YouTube 可混排）。同一视频多个分P 可直接写范围，如 https://www.bilibili.com/video/BV1xxxx?p=1-8。点「开始逐个处理」后由扩展后台逐个抓字幕并发送，切到别的页面也会继续"></textarea>
       <div class="input-row">
         <button id="bn-queue-set" class="primary">加入队列</button>
         <button id="bn-queue-start" class="primary">开始逐个处理</button>
         <button id="bn-queue-skip" class="secondary">跳过当前</button>
         <button id="bn-queue-clear" class="secondary">清空队列</button>
       </div>
-      <div class="status" id="bn-queue-status">队列为空。把多个视频链接贴进来，点「开始逐个处理」：每个视频都走上方单条流程（抓字幕 → 核对 → 发送 → 记完自动填下一个链接）。</div>
+      <div class="status" id="bn-queue-status">队列为空。把多个视频链接贴进来，点「开始逐个处理」：抓字幕、发送、记完接下去都由后台完成，切走页面也不会停；连续 2 条失败会自动暂停。</div>
     </section>
 
     <section class="card">
@@ -101,7 +106,7 @@
       <div class="status" id="ob-manual-status"></div>
     </section>
 
-    <footer>完全免费 · 字幕与笔记只发给你自己的豆包对话框和本地 Obsidian · 不收集任何数据</footer>
+    <footer>完全免费 · 字幕与笔记只发给你自己的豆包 / DeepSeek 对话框和本地 Obsidian · 不收集任何数据</footer>
   </div>
   <script src="app.js"></script>
 </body>

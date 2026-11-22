@@ -5,14 +5,36 @@
 
 (() => {
   const PENDING_KEY = 'bn_pending_submit';
+  // v3.8.9：同一份内容脚本同时注入豆包与 DeepSeek（chat.deepseek.com）。
+  // 两者的"找到输入框 / 点发送 / 抓回答"都走通用启发式，只在少数平台差异处分支。
+  const PLAT = location.hostname.indexOf('deepseek') >= 0 ? 'deepseek' : 'doubao';
+  const PLAT_LABEL = PLAT === 'deepseek' ? 'DeepSeek' : '豆包';
   // 每次注入都全新初始化：扩展重载后旧脚本实例失效但 window.__bnLoaded 标志残留，
   // 若沿用"已加载则复用"逻辑，新脚本会被失效的旧函数拦截导致本页永不再工作。
   // 防重复由以下机制保证：pending 消费（发送前即删除）+ window.__bnWatching（同页只监控一次）。
   window.__bnLoaded = true;
-  console.log('[B站笔记助手] v3.7.88 内容脚本已注入 ' + location.host + ' | textarea=' + document.querySelectorAll('textarea').length + ' | contenteditable=' + document.querySelectorAll('[contenteditable]').length + ' | role=textbox=' + document.querySelectorAll('[role="textbox"]').length);
+  console.log('[B站笔记助手] v3.8.9 内容脚本已注入 ' + location.host + ' | 平台=' + PLAT_LABEL +
+    ' | textarea=' + document.querySelectorAll('textarea').length +
+    ' | contenteditable=' + document.querySelectorAll('[contenteditable]').length +
+    ' | role=textbox=' + document.querySelectorAll('[role="textbox"]').length);
+  // DeepSeek 首次注入打一次结构诊断：真机上如果发送/抓取不灵，把这几行发出来就能定位选择器。
+  if (PLAT === 'deepseek') {
+    try {
+      const editors = Array.from(document.querySelectorAll('textarea, [contenteditable], [role="textbox"]'));
+      console.log('[B站笔记助手] DeepSeek 输入框候选=' + editors.length + ' ' +
+        editors.slice(0, 3).map((e) => (e.tagName + (e.id ? '#' + e.id : '') + '.' + String(e.className || '').slice(0, 40)).replace(/\s+/g, ' ')).join(' | '));
+      const btns = Array.from(document.querySelectorAll('button, [role="button"]')).filter((b) => b.offsetParent !== null);
+      console.log('[B站笔记助手] DeepSeek 可见按钮=' + btns.length + ' ' +
+        btns.slice(-6).map((b) => ('[' + (b.getAttribute('aria-label') || '') + '|' + String(b.textContent || '').trim().slice(0, 12) + ']')).join(' '));
+      console.log('[B站笔记助手] DeepSeek markdown 容器=' + document.querySelectorAll('[class*="markdown"]').length +
+        ' | 消息容器=' + document.querySelectorAll('[class*="message"]').length);
+    } catch (e) { /* 诊断失败不影响主流程 */ }
+  }
 
   // 找到可见的输入框，覆盖多种形态：textarea / contenteditable / role=textbox / 带"发消息"占位符
   function findEditor() {
+    // v3.8.9：DeepSeek 登录页/注册页没有聊天输入框，若在这类页面命中可编辑区就是写错地方 → 不返回
+    if (PLAT === 'deepseek' && /sign_in|signin|login|register/i.test(location.pathname + location.search)) return null;
     const visible = (el) => el.offsetParent !== null;
 
     let els = Array.from(document.querySelectorAll('textarea')).filter(visible);
@@ -75,6 +97,9 @@
   // v3.7.80：豆包专家模式（深度思考）——探测输入区附近的"深度思考/专家模式"开关并点击。
   // 选择器用文本模糊匹配（豆包界面按钮文案/aria-label/data-testid），找不到开关时无害返回 false。
   function tryEnableExpertMode() {
+    // v3.8.9：DeepSeek 页面的"深度思考"是 R1 推理开关（会多耗几十秒思考时间、输出风格也会变），
+    // 与豆包的"专家模式"不是一回事，不在这里自动点开。
+    if (PLAT === 'deepseek') return false;
     try {
       const re = /深度思考|专家模式|专业模式/i;
       const all = Array.from(document.querySelectorAll('button, [role="button"], [class*="mode"], [class*="think"]'));
@@ -108,7 +133,7 @@
   function pressEnterReal() {
     return new Promise((resolve) => {
       try {
-        chrome.runtime.sendMessage({ type: 'pressEnterReal' }, (resp) => {
+        chrome.runtime.sendMessage({ type: 'pressEnterReal', platform: PLAT }, (resp) => {
           if (chrome.runtime.lastError) resolve({ ok: false, error: chrome.runtime.lastError.message });
           else resolve(resp);
         });
@@ -852,10 +877,31 @@
     return commonRun(a, b) >= 4;
   }
 
+  // v3.8.9：判断节点是否属于"深度思考"过程块（DeepSeek R1 的 thinking 区同理）。
+  // 不认具体类名认语义：祖先 6 层内的 class / aria-label / data-testid 含 think|reason|思考，
+  // 或节点自身文本以"已深度思考 / 思考中 / 思考过程"开头的，一律按思考内容剔除。
+  function isThinkNode(el) {
+    let cur = el;
+    for (let i = 0; i < 6 && cur; i++) {
+      const cls = typeof cur.className === 'string' ? cur.className : '';
+      const attrs = ((cur.getAttribute && cur.getAttribute('aria-label')) || '') + ' ' +
+        ((cur.getAttribute && cur.getAttribute('data-testid')) || '') + ' ' +
+        ((cur.getAttribute && cur.getAttribute('role')) || '');
+      if (/think|reason|思考/i.test(cls + ' ' + attrs)) return true;
+      cur = cur.parentElement;
+    }
+    const txt = String(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+    if (/^(已深度思考|深度思考|思考中|思考过程|正在思考|Thought|Thinking)/i.test(txt)) return true;
+    return false;
+  }
+
   // 从页面提取"最后一条 AI 回答"文本（多候选选择器，兼容豆包页面结构变化）
   function extractAnswerText() {
     const STATE_RE = /(正在|思考|整理|生成|分析中|稍等|请稍候|加载中|回答中|努力|输入中)/;
-    const sels = [
+    // v3.8.9：DeepSeek 用宽匹配（思考块与正式回答都可能带 markdown 类名），
+    // 再靠 isThinkNode 整块剔除思考内容——只用 ds-markdown 的话，若该类名只挂在思考块上，
+    // 会在"只有思考块"时返回空、永远等不到正式回答。
+    const sels = (PLAT === 'deepseek' ? ['[class*="markdown"]'] : []).concat([
       '[data-testid*="assistant"]',
       '[data-testid*="answer"]',
       '[data-testid*="bot"]',
@@ -869,10 +915,10 @@
       '[class*="reply-content"]',
       '[class*="bot-answer"]',
       '[class*="message-content"]'
-    ];
+    ]);
     for (const sel of sels) {
       try {
-        const nodes = Array.from(document.querySelectorAll(sel)).filter((el) => {
+        let nodes = Array.from(document.querySelectorAll(sel)).filter((el) => {
           if (el.offsetParent === null && el.getClientRects().length === 0) return false;
           // 排除输入框及其内部内容（避免把发送到输入框的字幕当成回答）
           if (el.closest && el.closest('[contenteditable], textarea, [role="textbox"]')) return false;
@@ -881,30 +927,90 @@
           return true;
         });
         if (nodes.length) {
-          // 拼接所有匹配节点的 HTML 并还原成 Markdown（豆包回答可能被拆成多个区块：核心要点/思维导图/关键节点）
+          // 拼接所有匹配节点的 HTML 并还原成 Markdown（回答可能被拆成多个区块：核心要点/思维导图/关键节点）
           // 用 innerHTML+转换而非 innerText：保住 ## 标题、- 列表、```mermaid 代码块、公式等格式
-          const raw = nodes.map((n) => htmlToMd(n.innerHTML || ''));
+          // v3.8.9：DeepSeek 的「深度思考」过程块内部同样用 markdown 渲染，会先于正式回答出现；
+          // 思考内容还会复述任务要求（"六板块""《标题》"），按文字特征取起点会直接抓到思考过程。
+          // 所以先整块剔除思考容器，再只保留最后一条消息里的节点（同一会话的历史回答不再并进来）。
+          let from = 0;
+          if (PLAT === 'deepseek') {
+            const origin = nodes;
+            const all = nodes.length;
+            const keep = nodes.filter((n) => !isThinkNode(n));
+            const dropped = all - keep.length;
+            let picked = [];
+            if (keep.length) {
+              const last = keep[keep.length - 1];
+              const boxSel = '[class*="message"], [class*="chat-item"], [class*="turn"], [class*="conversation"]';
+              const box = last.closest(boxSel);
+              picked = box
+                ? keep.filter((n) => n.closest(boxSel) === box)
+                : keep.filter((n) => n.parentElement === last.parentElement);
+              if (!picked.length) picked = [last];
+            } else {
+              // 兜底：候选全被判成思考块时，若其中确实有"明显是完整笔记"的长文本，
+              // 说明是祖先判定误伤了整页 → 宁可认最后一条，也不要永远等不到结果。
+              const suspect = origin.filter((n) => {
+                const tx = String(n.innerText || '');
+                return tx.length > 400 && /一、|核心要点/.test(tx);
+              });
+              if (suspect.length) {
+                picked = [suspect[suspect.length - 1]];
+                console.log('[B站笔记助手] 思考块判定疑似误伤整页，按最后一条长文本兜底，长度=' +
+                  String(picked[0].innerText || '').length);
+              }
+            }
+            nodes = picked;
+            console.log('[B站笔记助手] DeepSeek 回答候选=' + all + '，剔除思考块=' + dropped + '，采用=' + nodes.length +
+              (dropped ? '，被剔除节点的 class=' + keep.length + '/' + all : ''));
+            if (!nodes.length) {
+              // 只有思考块 = 正式回答还没开始，按"尚无回答"处理，让基线拦截生效，绝不落盘半截
+              return '';
+            }
+            from = 0;
+          }
+          const raw = nodes.slice(from).map((n) => {
+            let h = n.innerHTML || '';
+            // v3.8.9：若命中的是"整条消息"这类外层容器，思考块会作为子节点一起被 innerHTML 带走
+            // （isThinkNode 只判祖先，判不到子块）。DeepSeek 下先把思考子树从副本里删掉再转 Markdown。
+            if (PLAT === 'deepseek') {
+              try {
+                const tmp = document.createElement('div');
+                tmp.innerHTML = h;
+                const th = tmp.querySelectorAll('[class*="think"], [class*="reason"], [class*="thinking"]');
+                for (let i = 0; i < th.length; i++) th[i].remove();
+                h = tmp.innerHTML;
+              } catch (e) { /* 剥除失败就按原 HTML 走，外层 isThinkNode 仍能拦大部分 */ }
+            }
+            return htmlToMd(h);
+          });
           let t = raw.filter((txt) => {
             if (txt.includes('字幕内容：')) return false;
             if (txt.includes('你是学习笔记助手')) return false;
             if (txt.includes('请把下面这段')) return false;
             return true;
           }).join('\n\n').trim();
-          // 从"最后一次出现"的起始标志（# 《标题》/《标题》/## 核心要点）开始截取：
-          // 每条笔记回答都以这三者之一开头，最后一次出现 = 最新一条回答的起点，
-          // 上一条/上上条历史回答、用户消息（公式修正请求）、UI 残留全部切掉；
+          // 从"最后一次出现"的标题开始截取：上一条/上上条历史回答、用户消息（公式修正请求）、
+          // UI 残留全部切掉；最后一次出现 = 最新一条回答的起点。
           // v3.7.85：加裸《 标志——豆包最新回答若不带 # 前缀，只认 # 《 会把截取点落到更早的历史回答上；
           // 截取点若落在 '# 《' 内部（丢了 # 前缀），回退到 # 保持标题格式
-          // v3.7.96：六板块模板新增「一、核心要点」起始标志——豆包偶尔会漏掉 # 《标题》 行，
-          // 只认 # 《 会把截取点落到更早的历史回答上
-          const START_MARKERS = ['# 《', '《', '## 一、核心要点', '## 核心要点'];
+          // v3.8.13：板块顺序改成「一、思维导图」开头后，不能再用"核心要点"当起点（会把第一板块切掉）；
+          // 标题缺失时才回退到首个板块标题（一、xxx / 二、核心要点 / 核心要点）
+          const START_MARKERS = ['# 《', '《'];
           let cutAt = -1;
           for (const mk of START_MARKERS) {
             const idx = t.lastIndexOf(mk);
             if (idx > cutAt) cutAt = idx;
           }
+          if (cutAt < 0) {
+            // 首板块标题优先（取最后一个 = 最新一条回答）；实在没有再看核心要点
+            const i1 = t.lastIndexOf('## 一、');
+            cutAt = i1 >= 0 ? i1 : Math.max(t.lastIndexOf('## 二、核心要点'), t.lastIndexOf('## 核心要点'));
+          }
           if (cutAt > 0 && t.slice(cutAt - 2, cutAt) === '# ') cutAt -= 2;
           if (cutAt > 0) t = t.slice(cutAt);
+          // v3.8.11：若模型在同一条回答里重复输出第二份笔记（从"整理说明/核心要点"重新开始），只保留第一份
+          t = trimDuplicateNote(t);
           // 截掉回答末尾豆包页面的"推荐提问/相关问题"（在最后一条 [mm:ss] 时间戳之后，或挤在同一行混入）
           const tsLines = t.split('\n');
           let lastTs = -1;
@@ -1040,6 +1146,83 @@
       if (!/^[A-Za-z0-9\s_^{}\\+\-*/=<>().,;:'[\]|]+$/.test(core)) return ln;
       return lead + '$' + core + '$';
     }).join('\n');
+  }
+
+  // v3.8.11：模型偶尔把同一篇笔记输出两遍（长回答续写时常见）——第二份从「整理说明」或「一、核心要点」重新开始。
+  // 只保留第一份：在第一个「核心要点」标题之后，若再次出现"整理说明"或"核心要点"标题，就在那里截断。
+  // 正常笔记这两个锚点各只出现一次（整理说明在核心要点之前），所以不会误伤。
+  function trimDuplicateNote(md) {
+    const t = String(md || '');
+    const sec = t.search(/##\s*(?:[一二三四五六七八九十]+、)?核心要点/);
+    if (sec < 0) return t;
+    const after = t.slice(sec + 1);
+    const m = /\[!info\][^\n]*整理说明|##\s*(?:[一二三四五六七八九十]+、)?核心要点/.exec(after);
+    if (!m) return t;
+    return t.slice(0, sec + 1 + m.index).replace(/\s+$/g, '');
+  }
+
+  // v3.8.7：豆包会把"关键节点"写成逐条字幕摘要（几十条），而文末又附了完整字幕 → 两处内容几乎一样。
+  // 这里按"相邻节点至少 45 秒"抽稀，再按上限等比取样，把它压回真正的关键节点（默认 16 条）。
+  // 找不到板块、或条目本来就少（≤上限）时原样返回；图片紧跟被删节点时一并删掉，避免留下孤图。
+  function trimKeyNodes(md, maxCount) {
+    const limit = maxCount || 16;
+    const lines = String(md || '').split('\n');
+    let start = -1;
+    let end = lines.length;
+    let level = 0;
+    for (let i = 0; i < lines.length; i++) {
+      const m = lines[i].match(/^(#{1,6})\s/);
+      if (m && /关键节点|关键时间点|时间节点|关键画面节点/.test(lines[i])) {
+        start = i;
+        level = m[1].length;
+        for (let j = i + 1; j < lines.length; j++) {
+          const m2 = lines[j].match(/^(#{1,6})\s/);
+          if (m2 && m2[1].length <= level) {
+            end = j;
+            break;
+          }
+        }
+        break;
+      }
+    }
+    if (start < 0) return md;
+    const tsRe = /^(\s*)(?:[-*]\s+)?\[(\d{1,2}):(\d{2})\]/;
+    const idx = [];
+    const secs = [];
+    for (let i = start + 1; i < end; i++) {
+      const m = lines[i].match(tsRe);
+      if (m) {
+        idx.push(i);
+        secs.push((+m[2]) * 60 + (+m[3]));
+      }
+    }
+    if (idx.length <= limit) return md;
+    // 先按 45 秒最小间隔抽稀
+    const keep = [];
+    let last = -999;
+    for (let k = 0; k < idx.length; k++) {
+      if (secs[k] - last >= 45) {
+        keep.push(k);
+        last = secs[k];
+      }
+    }
+    // 仍超过上限 → 按时间均匀取样
+    let picked = keep;
+    if (picked.length > limit) {
+      const step = picked.length / limit;
+      picked = [];
+      for (let k = 0; k < limit; k++) picked.push(keep[Math.floor(k * step)]);
+    }
+    const drop = [];
+    for (let k = 0; k < idx.length; k++) if (picked.indexOf(k) < 0) drop.push(idx[k]);
+    const removed = new Set(drop);
+    for (const i of drop) {
+      // 节点下面紧接着的截图属于这个被删节点，一起删掉
+      let j = i + 1;
+      while (j < end && lines[j].trim() === '') j++;
+      if (j < end && /^!\[\[/.test(lines[j].trim())) removed.add(j);
+    }
+    return lines.filter((_, i) => !removed.has(i)).join('\n');
   }
 
   // v3.7.97：行内公式收尾规整——修掉逐符号转换遗留的三类坏形态：
@@ -1463,6 +1646,8 @@
     // 合并回原笔记后不会再经过转换管线；这是"改了还有乱码"的最后一个漏点。
     // 消毒是幂等的（合法公式逐字不变），skipConvert 的已转换原稿再跑一遍也不会被改坏。
     content = wrapBareLatexLines(sanitizeInlineMath(content));
+    // v3.8.7：把"关键节点"里逐条字幕式的几十条压回 16 条左右，避免与文末原始字幕重复
+    content = trimKeyNodes(content, 16);
     const residue = detectMathResidue(content);
     const rounds = window.__bnFixRounds || 0;
     // v3.7.93：单行残留不值得再等豆包一轮（本地消毒器已经尽力），只有 ≥2 行明显硬错误才发修正请求
@@ -1477,7 +1662,7 @@
       showTip('检测到 ' + residue.length + ' 行公式待修正，正在让豆包定向修正（只需几秒）……');
       window.__bnFixBase = content; // 存原笔记，修正回答回来后按前缀合并
       window.__bnFixAt = Date.now(); // v3.7.92：记时间，修正轮 90 秒没等到就回退保存原稿（别让用户干等 5 分钟）
-      chrome.storage.local.set({ [PENDING_KEY]: { text: fixPrompt, title: title || '', ts: Date.now(), batchId: batchId || '' } });
+      chrome.storage.local.set({ [PENDING_KEY]: { text: fixPrompt, title: title || '', ts: Date.now(), batchId: batchId || '', platform: PLAT } });
       return;
     }
     let resp = null;
@@ -1546,6 +1731,33 @@
         const t = String(raw).replace(/\s+/g, '').trim();
         if (t === '停止' || t === '停止生成' || t === '停止回答' || t === 'Stop' || t === 'Stopgenerating') return true;
       }
+      // v3.8.9：DeepSeek 的停止控件可能只是图标按钮（没有 aria-label、没有文字），
+      // 额外按 title / class / 按钮内文字放宽判断；只在 DeepSeek 分支启用，不影响豆包已验证的行为。
+      if (PLAT === 'deepseek') {
+        const ds = document.querySelectorAll('button, [role="button"]');
+        for (let i = 0; i < ds.length; i++) {
+          const b = ds[i];
+          if (b.offsetParent === null) continue;
+          const votes = [
+            b.getAttribute && b.getAttribute('title'),
+            b.getAttribute && b.getAttribute('aria-label'),
+            typeof b.className === 'string' ? b.className : '',
+            b.innerText || ''
+          ];
+          for (let k = 0; k < votes.length; k++) {
+            const s = String(votes[k] || '');
+            if (s.length <= 24 && /停止|\bstop\b/i.test(s)) return true;
+          }
+        }
+        // 思考阶段同样算"还在写"：可见的思考块末尾还挂着"思考中"，说明正式回答没开始
+        const th = document.querySelectorAll('[class*="think"], [class*="reason"]');
+        for (let i = 0; i < th.length; i++) {
+          const el = th[i];
+          if (el.offsetParent === null) continue;
+          const tail = String(el.innerText || '').slice(-60);
+          if (/思考中|正在思考|Thinking|思考过程…/.test(tail)) return true;
+        }
+      }
       return false;
     } catch (e) {
       return false;
@@ -1583,7 +1795,7 @@
         window.__bnFixAt = 0;
         window.__bnFixRounds = 0;
         if (base) {
-          showTip('等待豆包修正超时（90 秒），已保存本地消毒后的笔记。');
+          showTip('等待' + PLAT_LABEL + '修正超时（90 秒），已保存本地消毒后的笔记。');
           finishAnswer(base, title, batchId, true);
           release();
           return;
@@ -1594,18 +1806,18 @@
         const base = window.__bnFixBase;
         window.__bnFixBase = null;
         if (base) {
-          showTip('等待豆包修正超时，已保存本地消毒后的笔记。');
+          showTip('等待' + PLAT_LABEL + '修正超时，已保存本地消毒后的笔记。');
           finishAnswer(base, title, batchId, true); // 原稿已转换过，不再二次转换
           release();
           return;
         }
         if (mismScene) {
           // v3.7.98：明确告知这是"防串号"拦截，而不是卡住——用户对静默失败零容忍
-          showTip('5 分钟内没有出现与本视频标题一致的新回答（豆包页可能还停在上一条笔记）。\n为避免把上一条存成本条，本次未写入 Obsidian。\n请确认豆包已回复本视频后再点一次发送。');
+          showTip('5 分钟内没有出现与本视频标题一致的新回答（' + PLAT_LABEL + '页可能还停在上一条笔记）。\n为避免把上一条存成本条，本次未写入 Obsidian。\n请确认' + PLAT_LABEL + '已回复本视频后再点一次发送。');
           notifyDone(false, title, '新回答未出现（回答仍上一条），未写入以防串号', batchId);
         } else {
-          showTip('等待豆包整理超时。请复制豆包的回答，到扩展页「手动保存」粘贴保存。');
-          notifyDone(false, title, '等待豆包整理超时', batchId);
+          showTip('等待' + PLAT_LABEL + '整理超时。请复制' + PLAT_LABEL + '的回答，到扩展页「手动保存」粘贴保存。');
+          notifyDone(false, title, '等待' + PLAT_LABEL + '整理超时', batchId);
         }
         release();
         return;
@@ -1704,16 +1916,28 @@
         genStuck = 0;
         console.log('[B站笔记助手] 生成检测连续 40 轮仍命中，判定为误伤，本次监控改用纯文本阈值');
       }
-      const baseNeed = (window.__bnExpertMode === true) ? 8 : 4;
+      // v3.8.9：DeepSeek 的"停止"控件没有稳定的可访问名，检测更容易漏 → 稳定阈值再加长 2 轮（约 6 秒兜底）
+      const baseNeed = ((window.__bnExpertMode === true) ? 8 : 4) + (PLAT === 'deepseek' ? 2 : 0);
       const stableNeed = baseNeed + ((answer || '').length >= 1200 ? 6 : 0);
       const titlePass = titleOk(answer);
       if (!isFixRound && answer && !titlePass && titleLog++ % 5 === 0) {
         mismScene = true;
         console.log('[B站笔记助手] 回答标题与本次视频不一致（疑似上一条），暂不保存：' + noteTitleOf(answer) + ' ≠ ' + title);
       }
+      // v3.8.9：DeepSeek 侧防半截——必须已经写出足够多的板块标题才允许落盘。
+      // 模板固定为 一、思维导图 / 二、核心要点 / 三、术语表 / 四、易错点与疑问 / 五、关键节点；
+      // 少于 4 个说明还在写（思考阶段或流式中途），继续等。5 分钟仍不齐会走超时提示，不会静默。
+      let sectionsSeen = 99;
+      if (PLAT === 'deepseek') {
+        const marks = ['一、', '二、', '三、', '四、', '五、'];
+        sectionsSeen = 0;
+        for (let i = 0; i < marks.length; i++) {
+          if (answer.indexOf(marks[i]) >= 0) sectionsSeen++;
+        }
+      }
       const hitOk = isFixRound
         ? (stable >= 2 && looksLikeFixAnswer(answer))
-        : (answer.length > 200 && stable >= stableNeed && sig(answer) !== lastSavedSig && !looksLikeUserMsg(answer) && looksLikeNote(answer) && titlePass);
+        : (answer.length > 200 && stable >= stableNeed && sig(answer) !== lastSavedSig && !looksLikeUserMsg(answer) && looksLikeNote(answer) && titlePass && sectionsSeen >= 4);
       if (!pendingDrop && hitOk) {
         confirmHit++;
         if (confirmHit < 2) {
@@ -1756,6 +1980,9 @@
       }
       const pending = items ? items[PENDING_KEY] : null;
       if (!pending || !pending.text) return;
+      // v3.8.9：同一条 pending 只发给它指定的平台。两个 AI 页并排（都算 visible）时，
+      // 旧逻辑会让另一平台的页面抢先把这条字幕发出去；旧数据没有 platform 字段，视为豆包。
+      if ((pending.platform || 'doubao') !== PLAT) return;
 
       const text = pending.text;
       const title = pending.title || '';
@@ -1764,7 +1991,13 @@
       const editor = findEditor();
       if (!editor) {
         // 页面可能还在加载（新打开的豆包页 React 未渲染完输入框）：保留 pending，等待下一轮轮询重试
-        console.log('[B站笔记助手] 未找到豆包输入框（页面可能仍在加载），保留待发送，等待重试…');
+        if (PLAT === 'deepseek' && /sign_in|signin|login/i.test(location.pathname + location.search)) {
+          if (!window.__bnLoginTip) {
+            window.__bnLoginTip = true;
+            showTip('看起来 DeepSeek 还没登录。请先在 Edge 登录 chat.deepseek.com，登录后字幕会自动发送（不重复发）。');
+          }
+        }
+        console.log('[B站笔记助手] 未找到' + PLAT_LABEL + '输入框（页面可能仍在加载），保留待发送，等待重试…');
         return;
       }
       // v3.8.5：等删除真正完成再继续。原来不 await，下一轮轮询可能在删除生效前又读到同一条
@@ -1806,7 +2039,7 @@
       if (!setEditorText(editor, text)) {
         console.log('[B站笔记助手] 输入框写入失败');
         copyFallback(text);
-        showTip('自动填写失败，字幕已复制到剪贴板，请手动粘贴到豆包输入框后发送。');
+        showTip('自动填写失败，字幕已复制到剪贴板，请手动粘贴到' + PLAT_LABEL + '输入框后发送。');
         return;
       }
 
@@ -1815,8 +2048,8 @@
         const startWatch = () => {
           if (!started) {
             started = true;
-            showTip('已自动发送到豆包，正在整理笔记…完成后将尝试自动保存。');
-            console.log('[B站笔记助手] 已发送字幕到豆包，开始监控回答');
+            showTip('已自动发送到' + PLAT_LABEL + '，正在整理笔记…完成后将尝试自动保存。');
+            console.log('[B站笔记助手] 已发送字幕到' + PLAT_LABEL + '，开始监控回答');
             watchAnswer(title, batchId, baseSig);
           }
         };
@@ -1841,7 +2074,7 @@
                 if (!stillHasText()) {
                   console.log('[B站笔记助手] 发送未成功（输入框仍有内容）');
                   copyFallback(text);
-                  showTip('自动发送未成功，字幕已复制到剪贴板，请手动粘贴到豆包输入框后发送。');
+                  showTip('自动发送未成功，字幕已复制到剪贴板，请手动粘贴到' + PLAT_LABEL + '输入框后发送。');
                 } else {
                   startWatch();
                 }

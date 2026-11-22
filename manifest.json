@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "B站/小红书/YouTube 学习笔记助手",
-  "version": "3.8.7",
-  "description": "Fetch Bilibili / Xiaohongshu / YouTube video subtitles and auto-send to Doubao AI to generate six-section structured study notes: key points, glossary, pitfalls & questions, mind map, key timestamps, plus the verbatim transcript. Completely free, no API key needed.",
+  "version": "3.8.14",
+  "description": "Fetch Bilibili / Xiaohongshu / YouTube video subtitles and auto-send to Doubao or DeepSeek to generate six-section structured study notes: mind map, key points, glossary, pitfalls & questions, key timestamps, plus the verbatim transcript. Batch queue runs in the background. Completely free, no API key needed.",
   "permissions": [
     "storage",
     "tabs",
@@ -13,6 +13,7 @@
     "https://*.bilibili.com/*",
     "https://*.hdslb.com/*",
     "https://*.doubao.com/*",
+    "https://chat.deepseek.com/*",
     "https://*.xiaohongshu.com/*",
     "https://*.rednote.com/*",
     "https://*.rednotecdn.com/*",
@@ -81,7 +82,8 @@
     },
     {
       "matches": [
-        "https://*.doubao.com/*"
+        "https://*.doubao.com/*",
+        "https://chat.deepseek.com/*"
       ],
       "js": [
         "content-doubao.js"
